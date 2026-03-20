@@ -1,0 +1,34 @@
+{
+  "name": "contract-review-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "db:init": "tsx scripts/init-db.ts",
+    "ingest": "tsx scripts/ingest.ts",
+    "analyze": "tsx scripts/analyze.ts",
+    "export": "tsx scripts/export-html.ts"
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "^4.2.2",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.5.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "autoprefixer": "^10.4.27",
+    "better-sqlite3": "^12.8.0",
+    "lucide-react": "^0.577.0",
+    "next": "^16.2.0",
+    "postcss": "^8.5.8",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tailwindcss": "^4.2.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "unpdf": "^1.4.0",
+    "xlsx": "^0.18.5"
+  }
+}
