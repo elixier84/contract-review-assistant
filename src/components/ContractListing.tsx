@@ -2,13 +2,14 @@
 
 import { Fragment, useEffect, useState, useMemo, useCallback } from "react";
 import {
-  Search, ChevronDown, ExternalLink, Link, List, GitGraph, Network, Upload,
+  Search, ChevronDown, ExternalLink, Link, List, GitGraph, Network, Upload, Zap,
 } from "lucide-react";
 import type { Contract } from "@/types";
 import TimelineView from "@/components/TimelineView";
 import RelationshipDiagram from "@/components/RelationshipDiagram";
 import ContractDetail from "@/components/ContractDetail";
 import ContractUpload from "@/components/ContractUpload";
+import BatchAnalysis from "@/components/BatchAnalysis";
 
 const formatDate = (d: string | null) => {
   if (!d) return "";
@@ -71,6 +72,7 @@ export default function ContractListing() {
   const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showUpload, setShowUpload] = useState(false);
+  const [showAnalysis, setShowAnalysis] = useState(false);
 
   const fetchContracts = useCallback(() => {
     fetch("/api/contracts").then(r => r.json()).then(d => {
@@ -145,6 +147,16 @@ export default function ContractListing() {
             >
               <Upload size={14} /> Upload
             </button>
+            <button
+              onClick={() => setShowAnalysis(!showAnalysis)}
+              className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition-all shrink-0 ${
+                showAnalysis
+                  ? "bg-amber-500 text-white shadow-sm"
+                  : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+              }`}
+            >
+              <Zap size={14} /> Analyze
+            </button>
           </div>
         )}
       </div>
@@ -153,6 +165,13 @@ export default function ContractListing() {
       {showUpload && viewMode === "list" && (
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
           <ContractUpload onComplete={() => { fetchContracts(); }} />
+        </div>
+      )}
+
+      {/* Analysis Panel */}
+      {showAnalysis && viewMode === "list" && (
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
+          <BatchAnalysis onComplete={() => { fetchContracts(); }} />
         </div>
       )}
 

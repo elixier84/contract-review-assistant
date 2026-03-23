@@ -1,8 +1,15 @@
 import { getDb, closeDb } from "../src/lib/db";
-import { analyzeContract } from "../src/lib/claude-analyzer";
+import { analyzeContractsBatch } from "../src/lib/claude-analyzer";
 
 async function main() {
   console.log("=== Contract Analysis ===\n");
+
+  // Parse optional --concurrency flag
+  const concurrencyArg = process.argv.find((a) => a.startsWith("--concurrency="));
+  const concurrency = concurrencyArg ? parseInt(concurrencyArg.split("=")[1], 10) : 6;
+
+  // Parse optional --no-cross flag to skip cross-contract analysis
+  const skipCross = process.argv.includes("--no-cross");
 
   const db = getDb();
 
@@ -20,24 +27,24 @@ async function main() {
   for (const c of contracts) {
     console.log(`  - ${c.id}: ${c.name}`);
   }
+  console.log(`\nConcurrency: ${concurrency}, Cross-contract: ${!skipCross}\n`);
 
-  let succeeded = 0;
-  let failed = 0;
-
-  for (const contract of contracts) {
-    try {
-      await analyzeContract(contract.id);
-      succeeded++;
-    } catch (err) {
-      console.error(`\n  FAILED to analyze ${contract.id}: ${err instanceof Error ? err.message : String(err)}`);
-      failed++;
-    }
-  }
+  const result = await analyzeContractsBatch(
+    contracts.map((c) => c.id),
+    concurrency,
+    (event) => {
+      // Progress events are already logged by analyzeContract
+    },
+    !skipCross,
+  );
 
   console.log("\n=== Summary ===");
-  console.log(`  Analyzed: ${succeeded}`);
-  console.log(`  Failed:   ${failed}`);
-  console.log(`  Total:    ${contracts.length}`);
+  console.log(`  Analyzed: ${result.succeeded}`);
+  console.log(`  Failed:   ${result.failed}`);
+  console.log(`  Total:    ${result.total}`);
+  if (result.crossContractNotesCreated !== undefined) {
+    console.log(`  Cross-contract notes: ${result.crossContractNotesCreated}`);
+  }
 
   // Show final state
   const results = db
