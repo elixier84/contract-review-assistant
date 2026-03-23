@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   Zap, Loader2, CheckCircle2, AlertCircle, XCircle,
-  ChevronDown, RotateCcw, GitCompareArrows,
+  ChevronDown, RotateCcw, GitCompareArrows, Trash2,
 } from "lucide-react";
 import { useAnalysisJob, type PromptStatusType } from "@/hooks/useAnalysisJob";
 import type { Contract } from "@/types";
@@ -53,6 +53,8 @@ export default function BatchAnalysis({ onComplete }: { onComplete?: () => void 
 
   const [availableContracts, setAvailableContracts] = useState<Contract[]>([]);
   const [expandedContracts, setExpandedContracts] = useState<string[]>([]);
+  const [resetting, setResetting] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
 
   // Fetch contracts list
   const fetchContracts = useCallback(() => {
@@ -73,9 +75,26 @@ export default function BatchAnalysis({ onComplete }: { onComplete?: () => void 
     }
   }, [status, onComplete]);
 
+  const analyzed = availableContracts.filter((c) => c.analysis_confidence !== null);
   const unanalyzed = availableContracts.filter((c) => c.analysis_confidence === null);
   const allIds = availableContracts.map((c) => c.id);
   const unanalyzedIds = unanalyzed.map((c) => c.id);
+
+  const handleReset = async (ids?: string[]) => {
+    setResetting(true);
+    try {
+      await fetch("/api/analyze/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(ids ? { contractIds: ids } : {}),
+      });
+      fetchContracts();
+      onComplete?.();
+    } finally {
+      setResetting(false);
+      setConfirmReset(false);
+    }
+  };
 
   const isRunning = status === "running" || status === "starting";
 
@@ -102,21 +121,72 @@ export default function BatchAnalysis({ onComplete }: { onComplete?: () => void 
     <div className="space-y-4">
       {/* Action Buttons */}
       {status === "idle" && (
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => startBatch(allIds)}
-            disabled={allIds.length === 0}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-xs font-bold flex items-center gap-2 hover:bg-blue-700 active:scale-95 transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <Zap size={14} /> Analyze All ({allIds.length})
-          </button>
-          {unanalyzedIds.length > 0 && unanalyzedIds.length < allIds.length && (
+        <div className="space-y-3">
+          {/* Status summary */}
+          <div className="text-xs text-slate-500">
+            <span className="font-bold text-slate-700">{allIds.length}</span> contracts total
+            {analyzed.length > 0 && (
+              <> &middot; <span className="font-bold text-green-600">{analyzed.length}</span> analyzed</>
+            )}
+            {unanalyzedIds.length > 0 && (
+              <> &middot; <span className="font-bold text-amber-600">{unanalyzedIds.length}</span> pending</>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* New contracts only */}
+            {unanalyzedIds.length > 0 && (
+              <button
+                onClick={() => startBatch(unanalyzedIds)}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-xs font-bold flex items-center gap-2 hover:bg-blue-700 active:scale-95 transition-all shadow-sm"
+              >
+                <Zap size={14} /> Analyze New ({unanalyzedIds.length})
+              </button>
+            )}
+
+            {/* Re-analyze all */}
             <button
-              onClick={() => startBatch(unanalyzedIds)}
-              className="px-4 py-2 bg-slate-100 text-slate-700 rounded-lg text-xs font-bold flex items-center gap-2 hover:bg-slate-200 transition-all"
+              onClick={() => startBatch(allIds)}
+              disabled={allIds.length === 0}
+              className="px-4 py-2 bg-slate-100 text-slate-700 rounded-lg text-xs font-bold flex items-center gap-2 hover:bg-slate-200 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <Zap size={14} /> Unanalyzed Only ({unanalyzedIds.length})
+              <Zap size={14} /> {analyzed.length > 0 ? "Re-analyze All" : "Analyze All"} ({allIds.length})
             </button>
+
+            {/* Reset */}
+            {analyzed.length > 0 && !confirmReset && (
+              <button
+                onClick={() => setConfirmReset(true)}
+                className="px-4 py-2 bg-white border border-red-200 text-red-600 rounded-lg text-xs font-bold flex items-center gap-2 hover:bg-red-50 transition-all"
+              >
+                <Trash2 size={14} /> Reset
+              </button>
+            )}
+          </div>
+
+          {/* Reset confirmation */}
+          {confirmReset && (
+            <div className="bg-red-50 border border-red-200 rounded-xl p-4 space-y-3">
+              <div className="text-xs font-bold text-red-800">
+                Reset analysis data? Contract files and extracted text will be preserved.
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handleReset()}
+                  disabled={resetting}
+                  className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 hover:bg-red-700 transition-colors disabled:opacity-50"
+                >
+                  {resetting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                  Reset All ({allIds.length})
+                </button>
+                <button
+                  onClick={() => setConfirmReset(false)}
+                  className="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-50 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
           )}
         </div>
       )}
