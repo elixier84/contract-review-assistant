@@ -1,11 +1,7 @@
-import { exec as execCallback } from "child_process";
-import { promisify } from "util";
+import { spawn } from "child_process";
 import fs from "fs";
-import os from "os";
 import path from "path";
 import { getDb } from "./db";
-
-const execAsync = promisify(execCallback);
 
 // ---------------------------------------------------------------------------
 // Model configuration per prompt
@@ -98,11 +94,43 @@ export function extractJson(raw: string): string {
   return stripped.slice(startIdx);
 }
 
-/** Write content to a temp file and return the path. Caller must unlink. */
-function writeTempFile(content: string): string {
-  const tmpPath = path.join(os.tmpdir(), `cra-prompt-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
-  fs.writeFileSync(tmpPath, content, "utf-8");
-  return tmpPath;
+/** Run claude CLI with content piped via stdin — cross-platform (macOS, Linux, Windows). */
+function runClaudeCLI(content: string, modelId: string, env: NodeJS.ProcessEnv): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("claude", ["--print", "--model", modelId], {
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: process.platform === "win32", // required for .cmd wrappers on Windows
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+    proc.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+
+    proc.stdin.write(content, "utf-8");
+    proc.stdin.end();
+
+    const timer = setTimeout(() => {
+      proc.kill();
+      reject(new Error("Claude CLI timeout (5 min)"));
+    }, 300_000);
+
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0 && stdout.trim() === "") {
+        reject(new Error(`Claude CLI exited ${code}: ${stderr.slice(0, 500)}`));
+      } else {
+        resolve(stdout);
+      }
+    });
+
+    proc.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -146,32 +174,20 @@ export async function runPrompt(
     combined += "\n\n" + extraContext;
   }
 
-  const tmpFile = writeTempFile(combined);
+  // Unset CLAUDECODE to allow nested CLI invocation
+  const env = { ...process.env };
+  delete env.CLAUDECODE;
 
-  try {
-    // Unset CLAUDECODE to allow nested CLI invocation
-    const env = { ...process.env };
-    delete env.CLAUDECODE;
+  const modelId = model ?? DEFAULT_MODEL;
+  const stdout = await runClaudeCLI(combined, modelId, env);
 
-    const modelId = model ?? DEFAULT_MODEL;
-    const { stdout } = await execAsync(`claude --print --model ${modelId} < "${tmpFile}"`, {
-      encoding: "utf-8",
-      maxBuffer: 10 * 1024 * 1024, // 10 MB
-      timeout: 300_000, // 5 min
-      shell: "/bin/zsh",
-      env,
-    });
-
-    // Check for model refusal before attempting JSON parse
-    if (detectRefusal(stdout)) {
-      throw new RefusalError(stdout.slice(0, 200));
-    }
-
-    const cleaned = extractJson(stdout);
-    return JSON.parse(cleaned);
-  } finally {
-    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+  // Check for model refusal before attempting JSON parse
+  if (detectRefusal(stdout)) {
+    throw new RefusalError(stdout.slice(0, 200));
   }
+
+  const cleaned = extractJson(stdout);
+  return JSON.parse(cleaned);
 }
 
 // ---------------------------------------------------------------------------
