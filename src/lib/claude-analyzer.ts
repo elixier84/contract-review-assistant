@@ -14,13 +14,13 @@ const execAsync = promisify(execCallback);
 export type ModelTier = "haiku" | "sonnet" | "opus";
 
 const PROMPT_MODEL_MAP: Record<string, ModelTier> = {
-  "01-metadata":        "haiku",   // 정형 데이터 추출 (날짜, 이름, 기술명)
+  "01-metadata":        "sonnet",  // 정형 데이터 추출 (날짜, 이름, 기술명)
   "02-clauses":         "sonnet",  // 조항 해석, 핵심 조건 판단
-  "03-glossary":        "haiku",   // 용어·정의 추출
+  "03-glossary":        "sonnet",  // 용어·정의 추출
   "04-relationships":   "sonnet",  // 계약간 관계 추론
   "05-pricing":         "sonnet",  // 복잡한 가격/할인 구조
-  "06-patents-products": "haiku",  // 특허번호·제품명 추출
-  "07-cross-contract":  "sonnet",  // 교차 비교 (가장 복잡)
+  "06-patents-products": "sonnet", // 특허번호·제품명 추출
+  "07-cross-contract":  "opus",    // 교차 비교 — 가장 복잡, 최고 품질 필요
 };
 
 const DEFAULT_MODEL: ModelTier = "sonnet";
@@ -54,7 +54,7 @@ export interface BatchResult {
 // ---------------------------------------------------------------------------
 
 /** Strip markdown code fences (```json ... ```) that Claude sometimes wraps around output. */
-function stripCodeFences(text: string): string {
+export function stripCodeFences(text: string): string {
   const fenced = text.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
   return fenced ? fenced[1].trim() : text.trim();
 }
@@ -64,7 +64,7 @@ function stripCodeFences(text: string): string {
  * (e.g. bkit feature reports, horizontal rules, markdown).
  * Finds the first top-level { or [ and matches to its closing counterpart.
  */
-function extractJson(raw: string): string {
+export function extractJson(raw: string): string {
   const stripped = stripCodeFences(raw);
 
   // Fast path: already valid JSON
@@ -109,6 +109,30 @@ function writeTempFile(content: string): string {
 // Core: run a Claude prompt against contract text (async, non-blocking)
 // ---------------------------------------------------------------------------
 
+// Refusal patterns from Claude CLI output
+const REFUSAL_PATTERNS = [
+  /\bI can(?:'t| not)\b/i,
+  /\bI'm unable\b/i,
+  /\bI am unable\b/i,
+  /\bI cannot\b/i,
+  /\bI'm not able\b/i,
+  /\bI must decline\b/i,
+  /\bI won't be able\b/i,
+];
+
+export function detectRefusal(text: string): boolean {
+  // Only check the first 500 chars — refusals appear at the start
+  const head = text.slice(0, 500);
+  return REFUSAL_PATTERNS.some((pattern) => pattern.test(head));
+}
+
+export class RefusalError extends Error {
+  constructor(public readonly rawOutput: string) {
+    super("Claude refused to analyze this content");
+    this.name = "RefusalError";
+  }
+}
+
 export async function runPrompt(
   promptPath: string,
   contractText: string,
@@ -137,6 +161,11 @@ export async function runPrompt(
       shell: "/bin/zsh",
       env,
     });
+
+    // Check for model refusal before attempting JSON parse
+    if (detectRefusal(stdout)) {
+      throw new RefusalError(stdout.slice(0, 200));
+    }
 
     const cleaned = extractJson(stdout);
     return JSON.parse(cleaned);
@@ -521,6 +550,16 @@ export async function analyzeContract(
         const errMsg = err instanceof Error ? err.message : String(err);
         console.error(`    ERROR in ${task.name} (${task.model ?? DEFAULT_MODEL}): ${errMsg}`);
         onProgress?.({ type: "prompt_error", contractId, promptName: task.name, model: task.model ?? DEFAULT_MODEL, error: errMsg });
+
+        // Create review_note for refusals so they're visible, not silent
+        if (err instanceof RefusalError) {
+          const noteDb = getDb();
+          noteDb.prepare(`
+            INSERT INTO review_notes (contract_id, type, issue, severity)
+            VALUES (?, 'analysis_refusal', ?, 'high')
+          `).run(contractId, `Model refused to analyze prompt ${task.name}: ${err.rawOutput}`);
+        }
+
         throw err;
       }
     }),

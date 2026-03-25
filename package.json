@@ -10,7 +10,8 @@
     "db:init": "tsx scripts/init-db.ts",
     "ingest": "tsx scripts/ingest.ts",
     "analyze": "tsx scripts/analyze.ts",
-    "export": "tsx scripts/export-html.ts"
+    "export": "tsx scripts/export-html.ts",
+    "demo": "tsx scripts/demo.ts"
   },
   "dependencies": {
     "@tailwindcss/postcss": "^4.2.2",
@@ -29,7 +30,9 @@
     "tailwindcss": "^4.2.2",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "unpdf": "^1.4.0",
-    "xlsx": "^0.18.5"
+    "unpdf": "^1.4.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.1"
   }
 }
