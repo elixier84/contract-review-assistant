@@ -85,15 +85,38 @@ export async function extractText(filePath: string): Promise<string> {
       // unpdf failed, try pandoc
     }
 
-    // Fallback: pandoc (handles some PDFs better)
+    // Fallback 2: pandoc (handles some PDFs better)
     try {
-      return execSync(`pandoc --to=plain --wrap=none "${filePath}"`, {
+      const pandocResult = execSync(`pandoc --to=plain --wrap=none "${filePath}"`, {
         encoding: "utf-8",
         maxBuffer: 10 * 1024 * 1024,
       }).trim();
+      if (pandocResult.length > 50) {
+        return pandocResult;
+      }
     } catch {
-      throw new Error(`PDF extraction failed for ${filePath}. Install pandoc or ensure PDF contains text.`);
+      // pandoc failed, try tesseract OCR
     }
+
+    // Fallback 3: tesseract OCR (for scanned PDFs)
+    try {
+      execSync("which tesseract", { stdio: "ignore" });
+      const ocrResult = execSync(`tesseract "${filePath}" stdout 2>/dev/null`, {
+        encoding: "utf-8",
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: 300_000, // 5 min for large scanned docs
+      }).trim();
+      if (ocrResult.length > 0) {
+        return ocrResult;
+      }
+    } catch {
+      // tesseract not installed or failed
+    }
+
+    throw new Error(
+      `PDF extraction failed for ${filePath}. Tried: unpdf, pandoc, tesseract. ` +
+      `Install tesseract for scanned PDF support: brew install tesseract`
+    );
   }
 
   if (ext === ".txt") {
@@ -160,7 +183,7 @@ function deriveContractName(fileName: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Generic file ingest (for uploaded files)
+// Upload-based ingest (for API file uploads — saves buffer to disk first)
 // ---------------------------------------------------------------------------
 
 export async function ingestFile(
@@ -168,33 +191,41 @@ export async function ingestFile(
   originalFileName: string,
   contractsDir: string,
 ): Promise<IngestResult> {
-  const fileName = originalFileName;
+  // Save uploaded file to contracts/ directory, then delegate to unified path
+  const destPath = path.join(contractsDir, originalFileName);
+  fs.writeFileSync(destPath, fileBuffer);
+  return ingestFromPath(destPath);
+}
+
+// ---------------------------------------------------------------------------
+// Ingest from filesystem path (unified path for npm run ingest + demo)
+// ---------------------------------------------------------------------------
+
+export async function ingestFromPath(filePath: string): Promise<IngestResult> {
+  const fileName = path.basename(filePath);
+  const fileBuffer = fs.readFileSync(filePath);
   const fileHash = computeFileHash(fileBuffer);
   const db = getDb();
 
-  // 1. Check content duplicate (same SHA-256 across any contract)
+  // Check content duplicate
   const contentDup = findDuplicateByHash(db, fileHash);
   if (contentDup) {
     return {
       id: contentDup.id,
       fileName,
-      status: "duplicate_content",
-      message: `Identical content already exists as contract ${contentDup.id} (${contentDup.name})`,
+      status: "skipped",
+      message: `Unchanged (contract ${contentDup.id})`,
     };
   }
 
-  // 2. Check filename duplicate (same file name, different content = update)
+  // Check filename duplicate (same file, new content = update)
   const filenameDup = findDuplicateByFilename(db, fileName);
   const isUpdate = !!filenameDup;
 
-  // 3. Save file to contracts/ directory
-  const destPath = path.join(contractsDir, fileName);
-  fs.writeFileSync(destPath, fileBuffer);
-
-  // 4. Extract text
+  // Extract text
   let rawText: string;
   try {
-    rawText = await extractText(destPath);
+    rawText = await extractText(filePath);
   } catch (err) {
     return {
       id: "",
@@ -213,14 +244,12 @@ export async function ingestFile(
     };
   }
 
-  // 5. Determine contract ID
-  const contractId = isUpdate ? filenameDup.id : deriveContractId(fileName);
-  const contractName = deriveContractName(fileName);
-
-  // 6. Check if known test file (use exact metadata)
+  // Use FILE_MAP metadata hints if available, otherwise derive from filename
   const knownMeta = FILE_MAP[fileName];
+  const contractId = isUpdate ? filenameDup.id : (knownMeta?.id ?? deriveContractId(fileName));
+  const contractName = knownMeta?.name ?? deriveContractName(fileName);
+  const contractType = knownMeta?.type ?? "technology_license";
 
-  // 7. Upsert into DB
   db.prepare(`
     INSERT INTO contracts (id, name, type, file_path, file_hash, raw_text, status, needs_review)
     VALUES (?, ?, ?, ?, ?, ?, 'Active', 1)
@@ -232,89 +261,40 @@ export async function ingestFile(
       raw_text = excluded.raw_text,
       needs_review = 1,
       updated_at = datetime('now')
-  `).run(
-    knownMeta?.id ?? contractId,
-    knownMeta?.name ?? contractName,
-    knownMeta?.type ?? "technology_license",
-    destPath,
-    fileHash,
-    rawText,
-  );
+  `).run(contractId, contractName, contractType, filePath, fileHash, rawText);
 
-  const finalId = knownMeta?.id ?? contractId;
   return {
-    id: finalId,
+    id: contractId,
     fileName,
     status: isUpdate ? "updated" : "new",
     message: isUpdate
-      ? `Updated contract ${finalId} with new content`
-      : `Created contract ${finalId}: ${knownMeta?.name ?? contractName}`,
+      ? `Updated contract ${contractId} with new content`
+      : `Created contract ${contractId}: ${contractName}`,
   };
 }
 
-// ---------------------------------------------------------------------------
-// Legacy: ingest from known file (backward compat for npm run ingest)
-// ---------------------------------------------------------------------------
-
-export async function ingestContract(filePath: string): Promise<{ id: string; skipped: boolean }> {
-  const fileName = path.basename(filePath);
-  const meta = FILE_MAP[fileName];
-
-  if (!meta) {
-    throw new Error(`Unknown contract file: ${fileName}`);
-  }
-
-  const db = getDb();
-  const fileHash = computeFileHashFromPath(filePath);
-
-  const existing = db
-    .prepare("SELECT file_hash FROM contracts WHERE id = ?")
-    .get(meta.id) as { file_hash: string } | undefined;
-
-  if (existing?.file_hash === fileHash) {
-    return { id: meta.id, skipped: true };
-  }
-
-  const rawText = await extractText(filePath);
-
-  db.prepare(`
-    INSERT INTO contracts (id, name, type, file_path, file_hash, raw_text)
-    VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      name = excluded.name,
-      type = excluded.type,
-      file_path = excluded.file_path,
-      file_hash = excluded.file_hash,
-      raw_text = excluded.raw_text,
-      updated_at = datetime('now')
-  `).run(meta.id, meta.name, meta.type, filePath, fileHash, rawText);
-
-  return { id: meta.id, skipped: false };
-}
-
-export async function ingestAllContracts(contractsDir: string): Promise<void> {
+export async function ingestAllContracts(contractsDir: string): Promise<IngestResult[]> {
   const files = fs.readdirSync(contractsDir).filter((f) =>
     /\.(docx|doc|pdf|txt)$/i.test(f)
   );
 
   if (files.length === 0) {
     console.log("No supported files found in", contractsDir);
-    return;
+    return [];
   }
 
   console.log(`Found ${files.length} file(s) in ${contractsDir}\n`);
 
+  const results: IngestResult[] = [];
   for (const file of files) {
     const filePath = path.join(contractsDir, file);
-    try {
-      const result = await ingestContract(filePath);
-      if (result.skipped) {
-        console.log(`  [SKIP] ${file} (unchanged)`);
-      } else {
-        console.log(`  [OK]   ${file} → contract ${result.id}`);
-      }
-    } catch (err) {
-      console.error(`  [ERR]  ${file}: ${err}`);
-    }
+    const result = await ingestFromPath(filePath);
+    results.push(result);
+
+    const tag = result.status === "error" ? "ERR" : result.status === "skipped" ? "SKIP" : "OK";
+    const prefix = result.status === "error" ? "  [ERR]  " : result.status === "skipped" ? "  [SKIP] " : "  [OK]   ";
+    console.log(`${prefix}${file}${result.id ? ` → contract ${result.id}` : ""}: ${result.message}`);
   }
+
+  return results;
 }

@@ -32,6 +32,12 @@ export default function Home() {
             <h1 className="text-xl font-black text-slate-800 tracking-tighter">Contract Review Assistant</h1>
           </div>
           <div className="flex items-center gap-3">
+          <a
+            href="/api/export-html"
+            className="px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 bg-slate-100 text-slate-600 hover:bg-slate-200 transition-all border border-slate-200 whitespace-nowrap"
+          >
+            <Download size={16} /> Export HTML
+          </a>
           <div className="flex bg-slate-100 p-1 rounded-lg overflow-x-auto shadow-inner border border-slate-200">
             {tabs.map((tab) => (
               <button
@@ -46,12 +52,6 @@ export default function Home() {
               </button>
             ))}
           </div>
-          <a
-            href="/api/export"
-            className="px-3 py-2 bg-green-600 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 hover:bg-green-700 transition-colors shadow-sm whitespace-nowrap"
-          >
-            <Download size={14} /> Export XLSX
-          </a>
           </div>
         </div>
       </header>
