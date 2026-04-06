@@ -13,6 +13,13 @@ export async function GET(request: Request) {
   const conditions: string[] = [];
   const params: string[] = [];
 
+  const projectId = searchParams.get("project_id");
+
+  if (projectId) {
+    conditions.push("c.project_id = ?");
+    params.push(projectId);
+  }
+
   if (technology) {
     conditions.push("pt.technology = ?");
     params.push(technology);

@@ -33,12 +33,13 @@ interface EnrichedTechnology {
   products: TechProduct[];
 }
 
-export default function TechnologyView() {
+export default function TechnologyView({ projectId }: { projectId?: number | null }) {
   const [techs, setTechs] = useState<EnrichedTechnology[]>([]);
   const [expanded, setExpanded] = useState<number[]>([]);
 
   useEffect(() => {
-    fetch("/api/technologies")
+    const qs = projectId ? `?project_id=${projectId}` : "";
+    fetch(`/api/technologies${qs}`)
       .then(r => r.json())
       .then(data => {
         const list = data.technologies as EnrichedTechnology[];

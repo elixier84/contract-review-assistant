@@ -38,7 +38,7 @@ const ALLOWED_TYPES = [
 ];
 const ALLOWED_EXTS = [".docx", ".doc", ".pdf", ".txt"];
 
-export default function ContractUpload({ onComplete }: { onComplete: () => void }) {
+export default function ContractUpload({ onComplete, projectId }: { onComplete: () => void; projectId?: number | null }) {
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [results, setResults] = useState<IngestResult[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -82,6 +82,7 @@ export default function ContractUpload({ onComplete }: { onComplete: () => void 
     for (const entry of files) {
       formData.append("files", entry.file);
     }
+    if (projectId) formData.append("project_id", String(projectId));
 
     try {
       const res = await fetch("/api/ingest", { method: "POST", body: formData });

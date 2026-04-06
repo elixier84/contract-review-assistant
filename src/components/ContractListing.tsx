@@ -38,7 +38,15 @@ function ContractRow({ contract, isChild, isExpandable, isExpanded, onToggle, on
             <div className="text-[10px] text-slate-400 font-mono tracking-tight mt-0.5 flex items-center gap-1.5">
               <Link size={10} /> {contract.type}
               {contract.analysis_confidence !== null && (
-                <span className={`ml-2 px-1.5 py-0.5 rounded text-[9px] font-black ${
+                <span
+                  title={
+                    contract.analysis_confidence >= 0.8
+                      ? "High confidence: AI extracted most fields clearly from the document"
+                      : contract.analysis_confidence >= 0.5
+                        ? "Medium confidence: Some fields were uncertain or partially extracted. Manual review recommended."
+                        : "Low confidence: Many fields could not be reliably extracted. Document may be poorly scanned or have unusual formatting."
+                  }
+                  className={`ml-2 px-1.5 py-0.5 rounded text-[9px] font-black cursor-help ${
                   contract.analysis_confidence >= 0.8 ? "bg-green-100 text-green-700" :
                   contract.analysis_confidence >= 0.5 ? "bg-yellow-100 text-yellow-700" :
                   "bg-red-100 text-red-700"
@@ -65,7 +73,7 @@ function ContractRow({ contract, isChild, isExpandable, isExpanded, onToggle, on
   );
 }
 
-export default function ContractListing() {
+export default function ContractListing({ projectId }: { projectId?: number | null }) {
   const [contracts, setContracts] = useState<Contract[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [expandedMasters, setExpandedMasters] = useState<string[]>([]);
@@ -75,7 +83,8 @@ export default function ContractListing() {
   const [showAnalysis, setShowAnalysis] = useState(false);
 
   const fetchContracts = useCallback(() => {
-    fetch("/api/contracts").then(r => r.json()).then(d => {
+    const qs = projectId ? `?project_id=${projectId}` : "";
+    fetch(`/api/contracts${qs}`).then(r => r.json()).then(d => {
       setContracts(d.contracts);
       const masters = d.contracts.filter((c: Contract) => !c.parent_id).map((c: Contract) => c.id);
       setExpandedMasters(masters);
@@ -164,14 +173,14 @@ export default function ContractListing() {
       {/* Upload Panel */}
       {showUpload && viewMode === "list" && (
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
-          <ContractUpload onComplete={() => { fetchContracts(); }} />
+          <ContractUpload onComplete={() => { fetchContracts(); }} projectId={projectId} />
         </div>
       )}
 
       {/* Analysis Panel */}
       {showAnalysis && viewMode === "list" && (
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6">
-          <BatchAnalysis onComplete={() => { fetchContracts(); }} />
+          <BatchAnalysis onComplete={() => { fetchContracts(); }} projectId={projectId} />
         </div>
       )}
 
@@ -218,8 +227,8 @@ export default function ContractListing() {
         </div>
       )}
 
-      {viewMode === "timeline" && <TimelineView />}
-      {viewMode === "relationship" && <RelationshipDiagram />}
+      {viewMode === "timeline" && <TimelineView projectId={projectId} />}
+      {viewMode === "relationship" && <RelationshipDiagram projectId={projectId} />}
 
       {/* Contract Detail Modal */}
       {selectedId && (

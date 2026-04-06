@@ -11,6 +11,13 @@ export async function GET(request: Request) {
   const conditions: string[] = [];
   const params: (string | number)[] = [];
 
+  const projectId = searchParams.get("project_id");
+
+  if (projectId) {
+    conditions.push("contract_id IN (SELECT id FROM contracts WHERE project_id = ?)");
+    params.push(projectId);
+  }
+
   if (contractId) {
     conditions.push("contract_id = ?");
     params.push(contractId);

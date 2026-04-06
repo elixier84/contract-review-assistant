@@ -25,7 +25,7 @@ const formatDate = (d: string | null) => {
   return `${date.getDate().toString().padStart(2, "0")}-${months[date.getMonth()]}-${date.getFullYear()}`;
 };
 
-export default function AuditOverview() {
+export default function AuditOverview({ projectId }: { projectId?: number | null }) {
   const [contracts, setContracts] = useState<Contract[]>([]);
   const [auditClauses, setAuditClauses] = useState<Clause[]>([]);
   const [retentionClauses, setRetentionClauses] = useState<Clause[]>([]);
@@ -33,17 +33,24 @@ export default function AuditOverview() {
   const [notes, setNotes] = useState<ReviewNote[]>([]);
   const [project, setProject] = useState<Project | null>(null);
   const [isEditing, setIsEditing] = useState(false);
-  const [editForm, setEditForm] = useState({ name: "", licensor: "", licensee: "" });
+  const [editForm, setEditForm] = useState({
+    name: "", licensor: "", licensee: "",
+    notification_date: "", audit_scope_start: "", audit_scope_end: "",
+  });
 
   const fetchAll = useCallback(() => {
-    fetch("/api/contracts").then(r => r.json()).then(d => setContracts(d.contracts));
-    fetch("/api/clauses?type=audit_right").then(r => r.json()).then(d => setAuditClauses(d.clauses));
-    fetch("/api/clauses?type=data_retention").then(r => r.json()).then(d => setRetentionClauses(d.clauses));
-    fetch("/api/clauses?type=interest").then(r => r.json()).then(d => setInterestClauses(d.clauses));
-    fetch("/api/notes").then(r => r.json()).then(d => setNotes(d.notes));
-    fetch("/api/projects").then(r => r.json()).then(d => {
-      if (d.active) setProject(d.active);
-    });
+    const qs = projectId ? `?project_id=${projectId}` : "";
+    const pqs = projectId ? `&project_id=${projectId}` : "";
+    fetch(`/api/contracts${qs}`).then(r => r.json()).then(d => setContracts(d.contracts));
+    fetch(`/api/clauses?type=audit_right${pqs}`).then(r => r.json()).then(d => setAuditClauses(d.clauses));
+    fetch(`/api/clauses?type=data_retention${pqs}`).then(r => r.json()).then(d => setRetentionClauses(d.clauses));
+    fetch(`/api/clauses?type=interest${pqs}`).then(r => r.json()).then(d => setInterestClauses(d.clauses));
+    fetch(`/api/notes${qs}`).then(r => r.json()).then(d => setNotes(d.notes));
+    if (projectId) {
+      fetch(`/api/projects/${projectId}`).then(r => r.json()).then(d => {
+        if (d.project) setProject(d.project);
+      });
+    }
   }, []);
 
   useEffect(() => {
@@ -65,9 +72,12 @@ export default function AuditOverview() {
 
   const handleEditStart = useCallback(() => {
     setEditForm({
-      name: project?.name || "Orion Audio License Compliance Audit",
-      licensor: project?.licensor || "Orion Audio Licensing Corporation",
-      licensee: project?.licensee || "Sakura Electronics Co., Ltd.",
+      name: project?.name || "",
+      licensor: project?.licensor || "",
+      licensee: project?.licensee || "",
+      notification_date: project?.notification_date || "",
+      audit_scope_start: project?.audit_scope_start || "",
+      audit_scope_end: project?.audit_scope_end || "",
     });
     setIsEditing(true);
   }, [project]);
@@ -132,6 +142,35 @@ export default function AuditOverview() {
                   placeholder="Licensee"
                 />
               </div>
+              <div className="flex gap-3">
+                <div className="flex-1 space-y-1">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Notification Date</label>
+                  <input
+                    type="date"
+                    value={editForm.notification_date}
+                    onChange={e => setEditForm(prev => ({ ...prev, notification_date: e.target.value }))}
+                    className="w-full text-sm bg-slate-50 border rounded-lg px-3 py-1.5 outline-none focus:ring-2 focus:ring-blue-200"
+                  />
+                </div>
+                <div className="flex-1 space-y-1">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Audit Period Start</label>
+                  <input
+                    type="date"
+                    value={editForm.audit_scope_start}
+                    onChange={e => setEditForm(prev => ({ ...prev, audit_scope_start: e.target.value }))}
+                    className="w-full text-sm bg-slate-50 border rounded-lg px-3 py-1.5 outline-none focus:ring-2 focus:ring-blue-200"
+                  />
+                </div>
+                <div className="flex-1 space-y-1">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Audit Period End</label>
+                  <input
+                    type="date"
+                    value={editForm.audit_scope_end}
+                    onChange={e => setEditForm(prev => ({ ...prev, audit_scope_end: e.target.value }))}
+                    className="w-full text-sm bg-slate-50 border rounded-lg px-3 py-1.5 outline-none focus:ring-2 focus:ring-blue-200"
+                  />
+                </div>
+              </div>
               <div className="flex gap-2">
                 <button onClick={handleSaveProject} className="px-3 py-1.5 bg-blue-600 text-white text-xs font-bold rounded-lg flex items-center gap-1.5 hover:bg-blue-700">
                   <Save size={12} /> Save
@@ -157,15 +196,35 @@ export default function AuditOverview() {
             </>
           )}
         </div>
-        <div className="flex bg-blue-50 border border-blue-100 rounded-2xl p-4 gap-6 shrink-0">
+        <div className="flex bg-blue-50 border border-blue-100 rounded-2xl p-4 gap-6 shrink-0 items-center">
+          {project?.notification_date && (
+            <>
+              <div className="text-center">
+                <div className="text-[10px] font-bold text-blue-400 uppercase tracking-tighter">Notification</div>
+                <div className="text-blue-900 font-mono text-sm font-bold">{formatDate(project.notification_date)}</div>
+              </div>
+              <div className="w-px bg-blue-200 h-8 self-center" />
+            </>
+          )}
+          {(project?.audit_scope_start || project?.audit_scope_end) && (
+            <>
+              <div className="text-center">
+                <div className="text-[10px] font-bold text-blue-400 uppercase tracking-tighter">Audit Period</div>
+                <div className="text-blue-900 font-mono text-sm font-bold">
+                  {formatDate(project.audit_scope_start)} — {formatDate(project.audit_scope_end)}
+                </div>
+              </div>
+              <div className="w-px bg-blue-200 h-8 self-center" />
+            </>
+          )}
           <div className="text-center">
             <div className="text-[10px] font-bold text-blue-400 uppercase tracking-tighter">Contracts</div>
-            <div className="text-blue-900 font-mono text-lg font-black">{contracts.length}</div>
+            <div className="text-blue-900 font-mono text-sm font-bold">{contracts.length}</div>
           </div>
           <div className="w-px bg-blue-200 h-8 self-center" />
           <div className="text-center">
             <div className="text-[10px] font-bold text-blue-400 uppercase tracking-tighter">Review Notes</div>
-            <div className="text-blue-900 font-mono text-lg font-black">{notes.length}</div>
+            <div className="text-blue-900 font-mono text-sm font-bold">{notes.length}</div>
           </div>
         </div>
       </div>
@@ -189,23 +248,31 @@ export default function AuditOverview() {
             </div>
           </div>
 
-          {/* Review Notes Summary */}
+          {/* Review Notes Summary — by category */}
           <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
             <h3 className="font-bold text-slate-800 flex items-center gap-2 border-b pb-4"><Pencil size={18} className="text-blue-500" /> Review Notes Summary</h3>
             <div className="space-y-3">
               {[
-                { label: "Pending Issues", count: pendingCount, bgOuter: "bg-red-50/50 border-red-100", bgDot: "bg-red-500", bgBadge: "bg-red-500" },
-                { label: "Reviewed Only", count: reviewedOnlyCount, bgOuter: "bg-orange-50/50 border-orange-100", bgDot: "bg-orange-500", bgBadge: "bg-orange-500" },
-                { label: "Resolved Items", count: resolvedCount, bgOuter: "bg-green-50/50 border-green-100", bgDot: "bg-green-500", bgBadge: "bg-green-500" },
-              ].map(item => (
-                <div key={item.label} className={`flex justify-between items-center p-3 border rounded-xl ${item.bgOuter}`}>
-                  <div className="flex items-center gap-3 text-left">
-                    <div className={`w-2.5 h-2.5 rounded-full ${item.bgDot}`} />
-                    <span className="text-xs font-bold text-slate-700">{item.label}</span>
+                { label: "Audit Findings", category: "audit_finding", bgOuter: "bg-red-50/50 border-red-100", bgDot: "bg-red-500", bgBadge: "bg-red-500" },
+                { label: "Document Gaps", category: "document_gap", bgOuter: "bg-amber-50/50 border-amber-100", bgDot: "bg-amber-500", bgBadge: "bg-amber-500" },
+                { label: "System Notes", category: "system", bgOuter: "bg-slate-50/50 border-slate-200", bgDot: "bg-slate-400", bgBadge: "bg-slate-400" },
+              ].map(item => {
+                const count = notes.filter(n => (n as Record<string, unknown>).category === item.category).length;
+                return (
+                  <div key={item.label} className={`flex justify-between items-center p-3 border rounded-xl ${item.bgOuter}`}>
+                    <div className="flex items-center gap-3 text-left">
+                      <div className={`w-2.5 h-2.5 rounded-full ${item.bgDot}`} />
+                      <span className="text-xs font-bold text-slate-700">{item.label}</span>
+                    </div>
+                    <span className={`${item.bgBadge} text-white text-[10px] font-black px-2.5 py-0.5 rounded-full`}>{count}</span>
                   </div>
-                  <span className={`${item.bgBadge} text-white text-[10px] font-black px-2.5 py-0.5 rounded-full`}>{item.count}</span>
-                </div>
-              ))}
+                );
+              })}
+            </div>
+            <div className="pt-2 border-t text-[10px] text-slate-400 flex justify-between">
+              <span>Pending: {pendingCount}</span>
+              <span>Reviewed: {reviewedOnlyCount}</span>
+              <span>Resolved: {resolvedCount}</span>
             </div>
           </div>
         </div>
@@ -241,7 +308,11 @@ export default function AuditOverview() {
                   );
                 })}
                 {auditClauses.length === 0 && (
-                  <tr><td colSpan={3} className="px-6 py-8 text-center text-slate-400 italic">Run analysis to populate clauses</td></tr>
+                  <tr><td colSpan={3} className="px-6 py-8 text-center text-slate-400 italic">
+                    {contracts.some(c => c.analysis_confidence !== null)
+                      ? "No audit right clauses found in this project's contracts"
+                      : "Run analysis to populate clauses"}
+                  </td></tr>
                 )}
               </tbody>
             </table>
@@ -264,7 +335,7 @@ export default function AuditOverview() {
                     );
                   })}
                   {retentionClauses.length === 0 && (
-                    <tr><td colSpan={3} className="px-4 py-6 text-center text-slate-400 italic text-[11px]">Pending analysis</td></tr>
+                    <tr><td colSpan={3} className="px-4 py-6 text-center text-slate-400 italic text-[11px]">{contracts.some(c => c.analysis_confidence !== null) ? "No matching clauses found" : "Pending analysis"}</td></tr>
                   )}
                 </tbody>
               </table>
@@ -286,7 +357,7 @@ export default function AuditOverview() {
                     );
                   })}
                   {interestClauses.length === 0 && (
-                    <tr><td colSpan={3} className="px-4 py-6 text-center text-slate-400 italic text-[11px]">Pending analysis</td></tr>
+                    <tr><td colSpan={3} className="px-4 py-6 text-center text-slate-400 italic text-[11px]">{contracts.some(c => c.analysis_confidence !== null) ? "No matching clauses found" : "Pending analysis"}</td></tr>
                   )}
                 </tbody>
               </table>

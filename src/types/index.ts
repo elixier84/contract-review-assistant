@@ -62,6 +62,7 @@ export interface ReviewNote {
   id: number;
   contract_id: string | null;
   type: string;
+  category: string;
   issue: string;
   severity: string;
   is_reviewed: number;

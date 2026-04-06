@@ -1,12 +1,21 @@
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 
-export async function GET() {
+export async function GET(request: Request) {
   const db = getDb();
+  const { searchParams } = new URL(request.url);
+  const projectId = searchParams.get("project_id");
 
-  const technologies = db
-    .prepare("SELECT * FROM technologies ORDER BY name")
-    .all();
+  // If project_id is specified, only return technologies linked to that project's contracts
+  const technologies = projectId
+    ? db.prepare(
+        `SELECT DISTINCT t.* FROM technologies t
+         JOIN tech_contract_map tcm ON tcm.tech_id = t.id
+         JOIN contracts c ON c.id = tcm.contract_id
+         WHERE c.project_id = ?
+         ORDER BY t.name`
+      ).all(projectId)
+    : db.prepare("SELECT * FROM technologies ORDER BY name").all();
 
   // For each technology, get the contract chain
   const enriched = (technologies as Record<string, unknown>[]).map((tech) => {

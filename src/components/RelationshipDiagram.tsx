@@ -64,38 +64,89 @@ function deduplicateEdges(relationships: Relationship[]): Edge[] {
   return Array.from(map.values());
 }
 
-function layoutNodes(contracts: Contract[]): Node[] {
-  const nodeW = 220;
-  const nodeH = 70;
-  const svgW = 800;
+function layoutNodes(contracts: Contract[], relationships: Relationship[]): Node[] {
+  const nodeW = 180;
+  const nodeH = 65;
+  const padding = 60;
 
-  // Find master (no parent), then group children
-  const master = contracts.find(c => c.type === "master_tc" || !c.parent_id);
-  const children = contracts.filter(c => c.parent_id);
-  const sideLetter = contracts.find(c => c.type === "side_letter");
+  // Initialize positions in a circle
+  const cx = 500;
+  const cy = 400;
+  const radius = Math.max(250, contracts.length * 30);
 
-  const nodes: Node[] = [];
+  const positions: { x: number; y: number }[] = contracts.map((_, i) => ({
+    x: cx + radius * Math.cos((2 * Math.PI * i) / contracts.length - Math.PI / 2),
+    y: cy + radius * Math.sin((2 * Math.PI * i) / contracts.length - Math.PI / 2),
+  }));
 
-  // Master at top center
-  if (master) {
-    nodes.push({ id: master.id, name: `${master.id}: ${master.name}`, type: master.type, x: svgW / 2 - nodeW / 2, y: 30, w: nodeW, h: nodeH });
+  // Build adjacency for force simulation
+  const idToIdx = new Map(contracts.map((c, i) => [c.id, i]));
+  const edges = relationships
+    .map(r => ({ s: idToIdx.get(r.source_id), t: idToIdx.get(r.target_id) }))
+    .filter(e => e.s !== undefined && e.t !== undefined) as { s: number; t: number }[];
+
+  // Simple force-directed iterations
+  for (let iter = 0; iter < 200; iter++) {
+    const fx = new Float64Array(contracts.length);
+    const fy = new Float64Array(contracts.length);
+
+    // Repulsion between all pairs
+    for (let i = 0; i < contracts.length; i++) {
+      for (let j = i + 1; j < contracts.length; j++) {
+        let dx = positions[i].x - positions[j].x;
+        let dy = positions[i].y - positions[j].y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const repulse = 80000 / (dist * dist);
+        dx = (dx / dist) * repulse;
+        dy = (dy / dist) * repulse;
+        fx[i] += dx; fy[i] += dy;
+        fx[j] -= dx; fy[j] -= dy;
+      }
+    }
+
+    // Attraction along edges
+    for (const e of edges) {
+      let dx = positions[e.t].x - positions[e.s].x;
+      let dy = positions[e.t].y - positions[e.s].y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const attract = (dist - 250) * 0.02;
+      dx = (dx / dist) * attract;
+      dy = (dy / dist) * attract;
+      fx[e.s] += dx; fy[e.s] += dy;
+      fx[e.t] -= dx; fy[e.t] -= dy;
+    }
+
+    // Center gravity
+    for (let i = 0; i < contracts.length; i++) {
+      fx[i] += (cx - positions[i].x) * 0.005;
+      fy[i] += (cy - positions[i].y) * 0.005;
+    }
+
+    // Apply forces with damping
+    const damping = 1 - iter / 250;
+    for (let i = 0; i < contracts.length; i++) {
+      positions[i].x += fx[i] * 0.1 * damping;
+      positions[i].y += fy[i] * 0.1 * damping;
+    }
   }
 
-  // Tech licenses in the middle row
-  const techLicenses = children.filter(c => c.type === "technology_license");
-  const midY = 180;
-  const spacing = 280;
-  const startX = svgW / 2 - ((techLicenses.length - 1) * spacing) / 2 - nodeW / 2;
-  techLicenses.forEach((c, i) => {
-    nodes.push({ id: c.id, name: `${c.id}: ${c.name}`, type: c.type, x: startX + i * spacing, y: midY, w: nodeW, h: nodeH });
+  // Normalize: shift so min x/y = padding
+  const minX = Math.min(...positions.map(p => p.x)) - nodeW / 2;
+  const minY = Math.min(...positions.map(p => p.y)) - nodeH / 2;
+  positions.forEach(p => {
+    p.x -= minX - padding;
+    p.y -= minY - padding;
   });
 
-  // Side letter at bottom center
-  if (sideLetter && !nodes.find(n => n.id === sideLetter.id)) {
-    nodes.push({ id: sideLetter.id, name: `${sideLetter.id}: ${sideLetter.name}`, type: sideLetter.type, x: svgW / 2 - nodeW / 2, y: 340, w: nodeW, h: nodeH });
-  }
-
-  return nodes;
+  return contracts.map((c, i) => ({
+    id: c.id,
+    name: `${c.id}: ${(c.name || "").slice(0, 28)}`,
+    type: c.type,
+    x: positions[i].x - nodeW / 2,
+    y: positions[i].y - nodeH / 2,
+    w: nodeW,
+    h: nodeH,
+  }));
 }
 
 function computeEdgePath(from: Node, to: Node): { path: string; labelX: number; labelY: number; angle: number } {
@@ -138,14 +189,15 @@ function rectEdgePoint(node: Node, angle: number): { x: number; y: number } {
   return { x: cx + cos * scale, y: cy + sin * scale };
 }
 
-export default function RelationshipDiagram() {
+export default function RelationshipDiagram({ projectId }: { projectId?: number | null }) {
   const [contracts, setContracts] = useState<Contract[]>([]);
   const [relationships, setRelationships] = useState<Relationship[]>([]);
   const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
 
   useEffect(() => {
-    fetch("/api/contracts").then(r => r.json()).then(async (data) => {
+    const qs = projectId ? `?project_id=${projectId}` : "";
+    fetch(`/api/contracts${qs}`).then(r => r.json()).then(async (data) => {
       setContracts(data.contracts);
       const allRels: Relationship[] = [];
       for (const c of data.contracts) {
@@ -167,13 +219,15 @@ export default function RelationshipDiagram() {
 
   if (!contracts.length) return null;
 
-  const nodes = layoutNodes(contracts);
+  const nodes = layoutNodes(contracts, relationships);
   const edges = deduplicateEdges(relationships);
-  const svgW = 800;
-  const svgH = 460;
+  const maxX = nodes.reduce((m, n) => Math.max(m, n.x + n.w), 0) + 40;
+  const maxY = nodes.reduce((m, n) => Math.max(m, n.y + n.h), 0) + 40;
+  const svgW = Math.max(800, maxX);
+  const svgH = Math.max(460, maxY);
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm">
       <div className="p-5 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
         <h3 className="font-bold text-slate-800 text-sm">Contract Relationship Map</h3>
         <div className="flex gap-4 text-[10px] font-bold text-slate-400">
@@ -186,11 +240,11 @@ export default function RelationshipDiagram() {
         </div>
       </div>
 
+      <div className="overflow-auto" style={{ maxHeight: 700 }}>
       <svg
         ref={svgRef}
         viewBox={`0 0 ${svgW} ${svgH}`}
-        className="w-full"
-        style={{ minHeight: 380 }}
+        style={{ width: svgW, height: svgH, minWidth: "100%" }}
       >
         <defs>
           {Object.entries(EDGE_COLORS).map(([type, color]) => (
@@ -337,6 +391,43 @@ export default function RelationshipDiagram() {
           );
         })}
       </svg>
+      </div>
+
+      {/* Relationship List */}
+      {edges.length > 0 && (
+        <div className="border-t border-slate-200">
+          <div className="p-4 bg-slate-50 border-b">
+            <h4 className="text-xs font-bold text-slate-600">Contract Relationships ({edges.length})</h4>
+          </div>
+          <table className="w-full text-left text-xs">
+            <thead className="bg-slate-50/50">
+              <tr className="text-[10px] text-slate-400 uppercase font-black border-b">
+                <th className="px-4 py-2">Source</th>
+                <th className="px-4 py-2">Target</th>
+                <th className="px-4 py-2">Type</th>
+                <th className="px-4 py-2">Confidence</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {relationships.map((r, i) => (
+                <tr key={i} className="hover:bg-slate-50">
+                  <td className="px-4 py-2 font-bold text-slate-700">{r.source_id}</td>
+                  <td className="px-4 py-2 font-bold text-slate-700">{r.target_id}</td>
+                  <td className="px-4 py-2">
+                    <span className="px-2 py-0.5 rounded text-[9px] font-black uppercase" style={{
+                      background: EDGE_COLORS[r.type] ? `${EDGE_COLORS[r.type]}20` : "#f1f5f9",
+                      color: EDGE_COLORS[r.type] || "#64748b",
+                    }}>
+                      {EDGE_LABELS[r.type] || r.type}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2 text-slate-500">{r.confidence ? `${(r.confidence * 100).toFixed(0)}%` : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

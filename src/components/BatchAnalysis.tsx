@@ -45,7 +45,7 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-export default function BatchAnalysis({ onComplete }: { onComplete?: () => void }) {
+export default function BatchAnalysis({ onComplete, projectId }: { onComplete?: () => void; projectId?: number | null }) {
   const {
     status, contracts, crossContractStatus, error,
     startBatch, reset,
@@ -58,11 +58,12 @@ export default function BatchAnalysis({ onComplete }: { onComplete?: () => void 
 
   // Fetch contracts list
   const fetchContracts = useCallback(() => {
-    fetch("/api/contracts")
+    const qs = projectId ? `?project_id=${projectId}` : "";
+    fetch(`/api/contracts${qs}`)
       .then((r) => r.json())
       .then((d) => setAvailableContracts(d.contracts || []))
       .catch(() => {});
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     fetchContracts();

@@ -20,12 +20,13 @@ interface PricingRow {
   needs_review: number;
 }
 
-export default function PricingView() {
+export default function PricingView({ projectId }: { projectId?: number | null }) {
   const [pricing, setPricing] = useState<PricingRow[]>([]);
   const [expanded, setExpanded] = useState<string[]>([]);
 
   useEffect(() => {
-    fetch("/api/pricing")
+    const qs = projectId ? `?project_id=${projectId}` : "";
+    fetch(`/api/pricing${qs}`)
       .then(r => r.json())
       .then(data => {
         setPricing(data.pricing as PricingRow[]);
@@ -100,12 +101,15 @@ export default function PricingView() {
                           {table.section} {table.technology && `| ${table.technology}`}
                         </div>
                       </div>
-                      <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-tighter shadow-sm border ${
-                        table.is_used_in_reports ? "bg-green-50 text-green-700 border-green-100" : "bg-slate-50 text-slate-400 border-slate-100"
-                      }`}>
-                        {table.is_used_in_reports ? <Activity size={10} /> : <Clock size={10} />}
-                        {table.is_used_in_reports ? "Used" : "Not Reported"}
-                      </div>
+                      {table.confidence !== null && (
+                        <span className={`px-2 py-0.5 rounded text-[9px] font-black ${
+                          (table.confidence ?? 0) >= 0.8 ? "bg-green-100 text-green-700" :
+                          (table.confidence ?? 0) >= 0.5 ? "bg-yellow-100 text-yellow-700" :
+                          "bg-red-100 text-red-700"
+                        }`}>
+                          {((table.confidence ?? 0) * 100).toFixed(0)}%
+                        </span>
+                      )}
                     </div>
 
                     {/* Tier table */}

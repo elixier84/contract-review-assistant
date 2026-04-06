@@ -16,31 +16,43 @@ import fs from "fs";
  * Generate a self-contained HTML report from the database.
  * Returns the HTML string and the output file path.
  */
-export function generateHtmlReport(dbPath?: string): { html: string; outPath: string } {
+export function generateHtmlReport(dbPath?: string, projectId?: number): { html: string; outPath: string; projectName?: string } {
   const resolvedDbPath = dbPath ?? path.join(process.cwd(), "data", "contracts.db");
   const db = new Database(resolvedDbPath, { readonly: true });
   db.pragma("journal_mode = WAL");
+
+  // Project filter helpers
+  const pf = projectId ? " WHERE project_id = ?" : "";
+  const cf = projectId ? " WHERE contract_id IN (SELECT id FROM contracts WHERE project_id = ?)" : "";
+  const rf = projectId ? " WHERE source_id IN (SELECT id FROM contracts WHERE project_id = ?)" : "";
+  const pp = projectId ? [projectId] : [];
 
   const contracts = db.prepare(`
     SELECT id, name, type, status, effective_date, expiry_date,
            parent_id, licensed_technology, territory, initial_fee,
            analysis_confidence, needs_review
-    FROM contracts ORDER BY id
-  `).all();
+    FROM contracts${pf} ORDER BY id
+  `).all(...pp);
 
-  const clauses = db.prepare(`SELECT * FROM clauses ORDER BY contract_id, type, section`).all();
-  const definitions = db.prepare(`SELECT * FROM definitions ORDER BY term`).all();
-  const relationships = db.prepare(`SELECT * FROM relationships ORDER BY source_id`).all();
-  const pricingTables = db.prepare(`SELECT * FROM pricing_tables ORDER BY contract_id`).all();
-  const patents = db.prepare(`SELECT * FROM patents ORDER BY contract_id, country`).all();
-  const products = db.prepare(`SELECT * FROM licensed_products ORDER BY contract_id`).all();
-  const reviewNotes = db.prepare(`SELECT * FROM review_notes ORDER BY severity DESC, created_at DESC`).all();
-  const technologies = db.prepare(`SELECT * FROM technologies ORDER BY name`).all();
+  const clauses = db.prepare(`SELECT * FROM clauses${cf} ORDER BY contract_id, type, section`).all(...pp);
+  const definitions = db.prepare(`SELECT * FROM definitions${cf} ORDER BY term`).all(...pp);
+  const relationships = db.prepare(`SELECT * FROM relationships${rf} ORDER BY source_id`).all(...pp);
+  const pricingTables = db.prepare(`SELECT * FROM pricing_tables${cf} ORDER BY contract_id`).all(...pp);
+  const patents = db.prepare(`SELECT * FROM patents${cf} ORDER BY contract_id, country`).all(...pp);
+  const products = db.prepare(`SELECT * FROM licensed_products${cf} ORDER BY contract_id`).all(...pp);
+  const reviewNotes = db.prepare(`SELECT * FROM review_notes${cf} ORDER BY severity DESC, created_at DESC`).all(...pp);
+  const technologies = projectId
+    ? db.prepare(`SELECT DISTINCT t.* FROM technologies t JOIN tech_contract_map tcm ON tcm.tech_id = t.id JOIN contracts c ON c.id = tcm.contract_id WHERE c.project_id = ? ORDER BY t.name`).all(projectId)
+    : db.prepare(`SELECT * FROM technologies ORDER BY name`).all();
 
   // Fetch project info
   let projectRow: Record<string, unknown> | undefined;
   try {
-    projectRow = db.prepare(`SELECT * FROM projects WHERE is_active = 1 LIMIT 1`).get() as Record<string, unknown> | undefined;
+    if (projectId) {
+      projectRow = db.prepare(`SELECT * FROM projects WHERE id = ?`).get(projectId) as Record<string, unknown> | undefined;
+    } else {
+      projectRow = db.prepare(`SELECT * FROM projects ORDER BY id DESC LIMIT 1`).get() as Record<string, unknown> | undefined;
+    }
   } catch { /* projects table may not exist */ }
 
   db.close();
@@ -62,6 +74,14 @@ export function generateHtmlReport(dbPath?: string): { html: string; outPath: st
   // ── Coverage banner data ──────────────────────────────────────────────────
   const totalContracts = contracts.length;
   const analyzedContracts = (contracts as Record<string, unknown>[]).filter((c) => c.analysis_confidence !== null).length;
+
+  // Date formatter helper
+  const formatDate = (d: string | null | undefined): string => {
+    if (!d) return "";
+    const date = new Date(d);
+    const months = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+    return `${date.getDate().toString().padStart(2, "0")}-${months[date.getMonth()]}-${date.getFullYear()}`;
+  };
 
   // ── Generate HTML ─────────────────────────────────────────────────────────
 
@@ -135,7 +155,7 @@ export function generateHtmlReport(dbPath?: string): { html: string; outPath: st
   .stat-blue { display: flex; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 16px; padding: 16px; gap: 24px; flex-shrink: 0; }
   .stat-blue-item { text-align: center; }
   .stat-blue-label { font-size: 10px; font-weight: 700; color: #60a5fa; text-transform: uppercase; letter-spacing: -0.02em; }
-  .stat-blue-value { font-size: 18px; font-weight: 900; color: #1e3a5f; font-family: ui-monospace, monospace; }
+  .stat-blue-value { font-size: 14px; font-weight: 700; color: #1e3a5f; font-family: ui-monospace, monospace; }
   .stat-blue-divider { width: 1px; background: #93c5fd; height: 32px; align-self: center; }
 
   /* Snippet */
@@ -256,45 +276,38 @@ export function generateHtmlReport(dbPath?: string): { html: string; outPath: st
 <body>
 
 <header>
-  <div class="inner">
-    <h1>
+  <!-- Top bar: logo + project info + stats -->
+  <div class="inner" style="padding-bottom: 8px;">
+    <div style="display: flex; align-items: center; gap: 12px;">
       <span class="icon-box">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><circle cx="11.5" cy="14.5" r="2.5"/><path d="M13.3 16.3 15 18"/></svg>
       </span>
-      Contract Review Assistant
-    </h1>
-    <div class="header-right">
+      <div>
+        <h1 style="margin: 0;">Contract Review Assistant</h1>
+        ${projectRow ? `<div style="font-size: 10px; color: #94a3b8; margin-top: 2px;">
+          <span style="font-weight: 700; color: #475569;">${projectRow.name || ""}</span>
+          <span style="margin-left: 4px;">(${projectRow.licensor || ""} / ${projectRow.licensee || ""})</span>
+        </div>` : ""}
+      </div>
+    </div>
+    <div style="display: flex; align-items: center; gap: 16px;">
+      ${projectRow?.notification_date ? `<div class="stat-blue-item"><div class="stat-blue-label">Notification</div><div style="font-size: 12px; font-weight: 700; color: #1e3a5f; font-family: monospace;">${formatDate(projectRow.notification_date as string)}</div></div>` : ""}
+      ${projectRow?.audit_scope_start ? `<div class="stat-blue-item"><div class="stat-blue-label">Audit Period</div><div style="font-size: 12px; font-weight: 700; color: #1e3a5f; font-family: monospace;">${formatDate(projectRow.audit_scope_start as string)} &mdash; ${formatDate(projectRow.audit_scope_end as string)}</div></div>` : ""}
       <div class="coverage-pill">
-        ${analyzedContracts} of ${totalContracts} contracts analyzed &middot;
-        ${clauses.length} clauses &middot; ${definitions.length} definitions &middot;
-        ${relationships.length} relationships &middot; ${reviewNotes.length} review notes
+        ${analyzedContracts}/${totalContracts} analyzed &middot;
+        ${reviewNotes.length} notes
       </div>
-      <div class="tabs" id="tabs">
-        <button class="tab-btn active" data-tab="overview">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>
-          Audit Overview
-        </button>
-        <button class="tab-btn" data-tab="listing">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
-          Contract Listing
-        </button>
-        <button class="tab-btn" data-tab="technology">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
-          Technology
-        </button>
-        <button class="tab-btn" data-tab="pricing">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" x2="12" y1="2" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-          Pricing
-        </button>
-        <button class="tab-btn" data-tab="glossary">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/></svg>
-          Glossary
-        </button>
-        <button class="tab-btn" data-tab="notes">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/></svg>
-          Review Notes
-        </button>
-      </div>
+    </div>
+  </div>
+  <!-- Tab navigation -->
+  <div class="inner" style="padding-top: 0; padding-bottom: 8px;">
+    <div class="tabs" id="tabs">
+      <button class="tab-btn active" data-tab="overview">Audit Overview</button>
+      <button class="tab-btn" data-tab="listing">Contract Listing</button>
+      <button class="tab-btn" data-tab="technology">Technology</button>
+      <button class="tab-btn" data-tab="pricing">Pricing</button>
+      <button class="tab-btn" data-tab="glossary">Glossary</button>
+      <button class="tab-btn" data-tab="notes">Review Notes</button>
     </div>
   </div>
 </header>
@@ -460,21 +473,27 @@ document.getElementById("tabs").addEventListener("click", function(e) {
   }
   h += '</div></div></div>';
 
-  // Review Notes Summary
+  // Review Notes Summary — by category
   h += '<div class="card" style="border-radius:16px"><div style="padding:24px"><h3 style="font-weight:700;color:#334155;display:flex;align-items:center;gap:8px;border-bottom:1px solid #e2e8f0;padding-bottom:16px;margin-bottom:16px"><span style="color:#3b82f6">' + icon("pencil", 18) + '</span> Review Notes Summary</h3>';
   h += '<div class="space-y-3">';
-  var summaryItems = [
-    { label: "Pending Issues", count: pending, bgOuter: "background:rgba(254,242,242,.5);border-color:#fecaca", dot: "#ef4444", badge: "#ef4444" },
-    { label: "Reviewed Only", count: reviewed, bgOuter: "background:rgba(255,247,237,.5);border-color:#fed7aa", dot: "#f97316", badge: "#f97316" },
-    { label: "Resolved Items", count: resolved, bgOuter: "background:rgba(240,253,244,.5);border-color:#bbf7d0", dot: "#22c55e", badge: "#22c55e" },
+  var catCounts = { audit_finding: 0, document_gap: 0, system: 0 };
+  for (var rn of DATA.reviewNotes) { var cat = rn.category || "uncategorized"; if (catCounts[cat] !== undefined) catCounts[cat]++; }
+  var catItems = [
+    { label: "Audit Findings", count: catCounts.audit_finding, bgOuter: "background:rgba(254,242,242,.5);border-color:#fecaca", dot: "#ef4444", badge: "#ef4444" },
+    { label: "Document Gaps", count: catCounts.document_gap, bgOuter: "background:rgba(255,251,235,.5);border-color:#fde68a", dot: "#f59e0b", badge: "#f59e0b" },
+    { label: "System Notes", count: catCounts.system, bgOuter: "background:rgba(248,250,252,.5);border-color:#e2e8f0", dot: "#94a3b8", badge: "#94a3b8" },
   ];
-  for (var si of summaryItems) {
+  for (var si of catItems) {
     h += '<div class="summary-row" style="' + si.bgOuter + '">';
     h += '<div style="display:flex;align-items:center;gap:12px;text-align:left"><div class="summary-dot" style="background:' + si.dot + '"></div><span style="font-size:12px;font-weight:700;color:#334155">' + si.label + '</span></div>';
     h += '<span style="background:' + si.badge + ';color:#fff;font-size:10px;font-weight:900;padding:2px 10px;border-radius:9999px">' + si.count + '</span>';
     h += '</div>';
   }
-  h += '</div></div></div>';
+  h += '</div>';
+  h += '<div style="padding-top:8px;border-top:1px solid #e2e8f0;margin-top:12px;font-size:10px;color:#94a3b8;display:flex;justify-content:space-between">';
+  h += '<span>Pending: ' + pending + '</span><span>Reviewed: ' + reviewed + '</span><span>Resolved: ' + resolved + '</span>';
+  h += '</div>';
+  h += '</div></div>';
 
   h += '</div>'; // end left column
 
@@ -1166,16 +1185,34 @@ document.getElementById("export-date").textContent = new Date(DATA.exportedAt).t
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const outPath = path.join(outDir, `contract-review-${timestamp}.html`);
+  const projectName = (projectRow?.name as string || "all").replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
+  const outPath = path.join(outDir, `${projectName}-${timestamp}.html`);
   fs.writeFileSync(outPath, html, "utf-8");
 
-  return { html, outPath };
+  return { html, outPath, projectName: projectRow?.name as string | undefined };
 }
 
 // ── CLI entry point ─────────────────────────────────────────────────────────
 
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(__filename)) {
-  const { outPath } = generateHtmlReport();
+  // Usage: npx tsx scripts/export-html.ts [--project <id>]
+  const args = process.argv.slice(2);
+  const projIdx = args.indexOf("--project");
+  const cliProjectId = projIdx >= 0 && projIdx + 1 < args.length ? Number(args[projIdx + 1]) : undefined;
+
+  // If no project specified, use the most recent one
+  let projectId = cliProjectId;
+  if (!projectId) {
+    const dbForCli = new Database(path.join(process.cwd(), "data", "contracts.db"), { readonly: true });
+    const latest = dbForCli.prepare("SELECT id, name FROM projects ORDER BY id DESC LIMIT 1").get() as { id: number; name: string } | undefined;
+    dbForCli.close();
+    if (latest) {
+      projectId = latest.id;
+      console.log(`Using latest project: ${latest.name} (ID: ${latest.id})`);
+    }
+  }
+
+  const { outPath } = generateHtmlReport(undefined, projectId);
   const sizeKB = (fs.statSync(outPath).size / 1024).toFixed(1);
   console.log(`\n✅ Export complete!`);
   console.log(`   File: ${outPath}`);

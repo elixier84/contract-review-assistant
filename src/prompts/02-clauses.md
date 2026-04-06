@@ -51,6 +51,6 @@ Return ONLY a JSON array with no markdown, no explanation:
 - For `interest`: always capture the exact rate AND whether it's per month/year/annum, and any cap ("not more than the maximum legal rate")
 - For `under_reporting`: capture the threshold ("$10,000 or 5%"), the penalty multiplier ("three times"), and what costs are recoverable
 - For `cpi_adjustment`: capture the base date ("December 1993"), the index name ("U.S. Consumer Cost of Living Adjustment (COLA)"), and application frequency
-- If the contract references Standard Terms and Conditions without restating them, note this — the clauses exist in the referenced document
-- Only extract clauses that are EXPLICITLY stated. Do not infer or assume clauses exist.
+- Only extract clauses that are EXPLICITLY stated in this document. Do not infer or assume clauses exist.
 - Set confidence lower (0.5-0.7) if clause language is ambiguous or if extraction required interpretation
+- **If the contract incorporates Standard Terms and Conditions by reference without restating specific clauses**: do NOT create low-confidence clause entries for those missing clauses. Instead, OMIT them entirely. The cross-reference will be handled separately in relationship analysis. Only extract what is actually written in THIS document.

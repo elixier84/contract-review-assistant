@@ -4,6 +4,18 @@ import path from "path";
 import { getDb } from "./db";
 
 // ---------------------------------------------------------------------------
+// Note category mapping: type → category
+// ---------------------------------------------------------------------------
+
+function noteCategory(type: string): string {
+  if (type.startsWith("cross_contract_")) return "audit_finding";
+  if (type === "clause_ambiguity" || type === "pricing_mismatch" || type === "date_conflict" || type === "discrepancy") return "audit_finding";
+  if (type === "missing_link" || type === "inherited_clause") return "document_gap";
+  if (type === "vision_enhanced" || type === "low_confidence") return "system";
+  return "uncategorized";
+}
+
+// ---------------------------------------------------------------------------
 // Model configuration per prompt
 // ---------------------------------------------------------------------------
 
@@ -314,8 +326,8 @@ export function storeRelationships(contractId: string, result: unknown[]): void 
       } else {
         // Create a review note for missing referenced contract
         db.prepare(`
-          INSERT INTO review_notes (contract_id, type, issue, severity)
-          VALUES (?, 'missing_link', ?, 'medium')
+          INSERT INTO review_notes (contract_id, type, category, issue, severity)
+          VALUES (?, 'missing_link', 'document_gap', ?, 'medium')
         `).run(
           contractId,
           `Contract references agreement ${targetId} which is not in the registry`,
@@ -502,9 +514,43 @@ export async function analyzeContract(
     return;
   }
 
-  const contractText = row.raw_text;
+  let contractText = row.raw_text;
   console.log(`\n  Analyzing contract ${contractId}: ${row.name}`);
   onProgress?.({ type: "contract_start", contractId });
+
+  // Pre-analysis: check text quality, run Vision enhancement if needed
+  const filePath = (db.prepare("SELECT file_path FROM contracts WHERE id = ?").get(contractId) as { file_path: string } | undefined)?.file_path;
+  if (filePath && filePath.toLowerCase().endsWith(".pdf")) {
+    try {
+      const pdfParse = require("pdf-parse");
+      const pdfFs = require("fs");
+      const pdfBuffer = pdfFs.readFileSync(filePath);
+      const pdfData = await pdfParse(pdfBuffer);
+      const avgCharsPerPage = pdfData.numpages > 0 ? contractText.length / pdfData.numpages : contractText.length;
+
+      // If average chars per page is low, likely has unreadable image pages
+      if (avgCharsPerPage < 300 && pdfData.numpages > 1) {
+        console.log(`  [Vision] Low text density detected: ${Math.round(avgCharsPerPage)} chars/page (${pdfData.numpages} pages). Running Vision enhancement...`);
+        const { enhancePdfWithVision } = await import("./vision-enhance");
+        const enhanced = await enhancePdfWithVision(filePath, contractText);
+
+        if (enhanced.visionPages.length > 0) {
+          contractText = enhanced.text;
+          // Update raw_text in DB
+          db.prepare("UPDATE contracts SET raw_text = ?, updated_at = datetime('now') WHERE id = ?")
+            .run(contractText, contractId);
+          // Add review note
+          db.prepare(`
+            INSERT INTO review_notes (contract_id, type, category, issue, severity, is_reviewed, narrative, created_at, updated_at)
+            VALUES (?, 'vision_enhanced', 'system', ?, 'medium', 0, '', datetime('now'), datetime('now'))
+          `).run(contractId, `Pages ${enhanced.visionPages.join(", ")} had low text density. Enhanced via Claude Vision OCR. Manual verification recommended.`);
+          console.log(`  [Vision] Enhanced: ${enhanced.visionPages.length} pages, text ${row.raw_text.length} → ${contractText.length} chars`);
+        }
+      }
+    } catch (err) {
+      console.warn(`  [Vision] Pre-analysis check failed: ${err instanceof Error ? err.message.slice(0, 100) : err}`);
+    }
+  }
 
   const tasks: PromptTask[] = [
     {
@@ -571,8 +617,8 @@ export async function analyzeContract(
         if (err instanceof RefusalError) {
           const noteDb = getDb();
           noteDb.prepare(`
-            INSERT INTO review_notes (contract_id, type, issue, severity)
-            VALUES (?, 'analysis_refusal', ?, 'high')
+            INSERT INTO review_notes (contract_id, type, category, issue, severity)
+            VALUES (?, 'analysis_refusal', 'system', ?, 'high')
           `).run(contractId, `Model refused to analyze prompt ${task.name}: ${err.rawOutput}`);
         }
 
@@ -593,9 +639,12 @@ export async function analyzeContract(
   }
 
   // Calculate overall confidence
+  // Exclude very low confidence values (< 0.3) — these typically mean
+  // "clause not present in this document" rather than "extraction failed"
+  const meaningfulConfidences = confidences.filter(c => c >= 0.3);
   const avgConfidence =
-    confidences.length > 0
-      ? confidences.reduce((sum, c) => sum + c, 0) / confidences.length
+    meaningfulConfidences.length > 0
+      ? meaningfulConfidences.reduce((sum, c) => sum + c, 0) / meaningfulConfidences.length
       : null;
 
   const needsReview = avgConfidence === null || avgConfidence < 0.8 ? 1 : 0;
@@ -611,8 +660,8 @@ export async function analyzeContract(
   // Auto-create review note for low-confidence tasks
   if (avgConfidence !== null && avgConfidence < 0.5) {
     db.prepare(`
-      INSERT INTO review_notes (contract_id, type, issue, severity)
-      VALUES (?, 'clause_ambiguity', ?, 'high')
+      INSERT INTO review_notes (contract_id, type, category, issue, severity)
+      VALUES (?, 'clause_ambiguity', 'audit_finding', ?, 'high')
     `).run(
       contractId,
       `Overall analysis confidence is ${avgConfidence.toFixed(2)} — below 0.5 threshold. Manual review recommended.`,
@@ -688,39 +737,49 @@ export async function analyzeContractsBatch(
 // Cross-contract analysis
 // ---------------------------------------------------------------------------
 
-function buildCrossContractContext(): string {
+function buildCrossContractContext(projectId?: number): string {
   const db = getDb();
 
+  const projectFilter = projectId ? " WHERE project_id = ?" : "";
+  const contractIdFilter = projectId
+    ? " WHERE contract_id IN (SELECT id FROM contracts WHERE project_id = ?)"
+    : "";
+  const relFilter = projectId
+    ? " WHERE source_id IN (SELECT id FROM contracts WHERE project_id = ?)"
+    : "";
+  const params = projectId ? [projectId] : [];
+
   const contracts = db.prepare(
-    "SELECT id, name, type, effective_date, expiry_date, parent_id, licensed_technology FROM contracts ORDER BY id",
-  ).all();
+    `SELECT id, name, type, effective_date, expiry_date, parent_id, licensed_technology FROM contracts${projectFilter} ORDER BY id`,
+  ).all(...params);
 
   const definitions = db.prepare(
-    "SELECT contract_id, term, definition, section FROM definitions ORDER BY term",
-  ).all();
+    `SELECT contract_id, term, definition, section FROM definitions${contractIdFilter} ORDER BY term`,
+  ).all(...params);
 
   const clauses = db.prepare(
-    "SELECT contract_id, type, section, snippet, key_terms_json, confidence FROM clauses ORDER BY contract_id",
-  ).all();
+    `SELECT contract_id, type, section, snippet, key_terms_json, confidence FROM clauses${contractIdFilter} ORDER BY contract_id`,
+  ).all(...params);
 
   const pricing = db.prepare(
-    "SELECT contract_id, technology, name, royalty_basis, tiers_json, discounts_json FROM pricing_tables ORDER BY contract_id",
-  ).all();
+    `SELECT contract_id, technology, name, royalty_basis, tiers_json, discounts_json FROM pricing_tables${contractIdFilter} ORDER BY contract_id`,
+  ).all(...params);
 
   const relationships = db.prepare(
-    "SELECT source_id, target_id, type, confidence FROM relationships ORDER BY source_id",
-  ).all();
+    `SELECT source_id, target_id, type, confidence FROM relationships${relFilter} ORDER BY source_id`,
+  ).all(...params);
 
   return JSON.stringify({ contracts, definitions, clauses, pricing, relationships }, null, 2);
 }
 
 export async function runCrossContractAnalysis(
   onProgress?: (event: AnalysisProgressEvent) => void,
+  projectId?: number,
 ): Promise<number> {
   console.log("\n  Running cross-contract analysis...");
   onProgress?.({ type: "cross_contract_start" });
 
-  const context = buildCrossContractContext();
+  const context = buildCrossContractContext(projectId);
   const crossModel = PROMPT_MODEL_MAP["07-cross-contract"] ?? DEFAULT_MODEL;
   const result = await runPrompt(PROMPT_FILES.crossContract, context, undefined, crossModel);
 
@@ -743,11 +802,12 @@ export async function runCrossContractAnalysis(
       : note.issue;
 
     db.prepare(`
-      INSERT INTO review_notes (contract_id, type, issue, severity)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO review_notes (contract_id, type, category, issue, severity)
+      VALUES (?, ?, ?, ?, ?)
     `).run(
       note.contract_id || null,
       note.type,
+      noteCategory(note.type),
       issue,
       note.severity || "medium",
     );

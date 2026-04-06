@@ -13,6 +13,7 @@ export async function POST(request: Request) {
 
   const formData = await request.formData();
   const files = formData.getAll("files") as File[];
+  const projectId = formData.get("project_id") as string | null;
 
   if (files.length === 0) {
     return NextResponse.json(
@@ -41,7 +42,7 @@ export async function POST(request: Request) {
     try {
       const arrayBuffer = await file.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
-      const result = await ingestFile(buffer, file.name, CONTRACTS_DIR);
+      const result = await ingestFile(buffer, file.name, CONTRACTS_DIR, projectId ? Number(projectId) : undefined);
       results.push(result);
     } catch (err) {
       results.push({

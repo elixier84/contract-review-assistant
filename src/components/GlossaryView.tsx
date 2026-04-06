@@ -4,14 +4,17 @@ import { useEffect, useState } from "react";
 import { Search, Plus, Book } from "lucide-react";
 import type { Definition } from "@/types";
 
-export default function GlossaryView() {
+export default function GlossaryView({ projectId }: { projectId?: number | null }) {
   const [definitions, setDefinitions] = useState<Definition[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
 
   useEffect(() => {
-    const q = searchTerm ? `?q=${encodeURIComponent(searchTerm)}` : "";
-    fetch(`/api/glossary${q}`).then(r => r.json()).then(d => setDefinitions(d.definitions));
-  }, [searchTerm]);
+    const params = new URLSearchParams();
+    if (searchTerm) params.set("q", searchTerm);
+    if (projectId) params.set("project_id", String(projectId));
+    const qs = params.toString() ? `?${params}` : "";
+    fetch(`/api/glossary${qs}`).then(r => r.json()).then(d => setDefinitions(d.definitions));
+  }, [searchTerm, projectId]);
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500 text-left">

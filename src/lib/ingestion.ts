@@ -3,7 +3,16 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { extractText as extractPdfText } from "unpdf";
+import pdfParse from "pdf-parse";
 import { getDb } from "./db";
+import { enhancePdfWithVision } from "./vision-enhance";
+
+// Portable pandoc path (no admin install needed)
+const PANDOC_BIN = (() => {
+  const local = path.join(process.cwd(), "tools", "pandoc-3.6.4", "pandoc.exe");
+  if (fs.existsSync(local)) return `"${local}"`;
+  return "pandoc"; // fallback to system PATH
+})();
 
 // ---------------------------------------------------------------------------
 // Types
@@ -62,65 +71,90 @@ function computeFileHashFromPath(filePath: string): string {
   return computeFileHash(content);
 }
 
-export async function extractText(filePath: string): Promise<string> {
+interface ExtractResult {
+  text: string;
+  visionPages: number[];
+}
+
+export async function extractText(filePath: string): Promise<ExtractResult> {
   const ext = path.extname(filePath).toLowerCase();
 
   if (ext === ".docx" || ext === ".doc") {
-    return execSync(`pandoc --to=plain --wrap=none "${filePath}"`, {
+    const text = execSync(`${PANDOC_BIN} --to=plain --wrap=none "${filePath}"`, {
       encoding: "utf-8",
       maxBuffer: 10 * 1024 * 1024,
     }).trim();
+    return { text, visionPages: [] };
   }
 
   if (ext === ".pdf") {
-    // Try unpdf first (pure JS, no system dependency, Node-compatible)
+    const pdfBuffer = fs.readFileSync(filePath);
+    let baseText = "";
+
+    // Try 1: unpdf (pure JS)
     try {
-      const pdfBuffer = fs.readFileSync(filePath);
       const { text } = await extractPdfText(pdfBuffer);
       const joined = text.join("\n").trim();
-      if (joined.length > 50) {
-        return joined;
-      }
+      if (joined.length > 50) baseText = joined;
     } catch {
-      // unpdf failed, try pandoc
+      // unpdf failed
     }
 
-    // Fallback 2: pandoc (handles some PDFs better)
-    try {
-      const pandocResult = execSync(`pandoc --to=plain --wrap=none "${filePath}"`, {
-        encoding: "utf-8",
-        maxBuffer: 10 * 1024 * 1024,
-      }).trim();
-      if (pandocResult.length > 50) {
-        return pandocResult;
+    // Try 2: pdf-parse (more robust for many PDF types)
+    if (!baseText) {
+      try {
+        const data = await pdfParse(pdfBuffer);
+        if (data.text && data.text.trim().length > 50) {
+          baseText = data.text.trim();
+        }
+      } catch {
+        // pdf-parse failed
       }
-    } catch {
-      // pandoc failed, try tesseract OCR
     }
 
-    // Fallback 3: tesseract OCR (for scanned PDFs)
-    try {
-      execSync("which tesseract", { stdio: "ignore" });
-      const ocrResult = execSync(`tesseract "${filePath}" stdout 2>/dev/null`, {
-        encoding: "utf-8",
-        maxBuffer: 10 * 1024 * 1024,
-        timeout: 300_000, // 5 min for large scanned docs
-      }).trim();
-      if (ocrResult.length > 0) {
-        return ocrResult;
+    // Try 3: pandoc (local portable)
+    if (!baseText) {
+      try {
+        const pandocResult = execSync(`${PANDOC_BIN} --to=plain --wrap=none "${filePath}"`, {
+          encoding: "utf-8",
+          maxBuffer: 10 * 1024 * 1024,
+        }).trim();
+        if (pandocResult.length > 50) baseText = pandocResult;
+      } catch {
+        // pandoc failed
       }
-    } catch {
-      // tesseract not installed or failed
     }
 
-    throw new Error(
-      `PDF extraction failed for ${filePath}. Tried: unpdf, pandoc, tesseract. ` +
-      `Install tesseract for scanned PDF support: brew install tesseract`
-    );
+    // Try 4: tesseract OCR (for scanned PDFs)
+    if (!baseText) {
+      try {
+        const tesseractBin = process.platform === "win32" ? "tesseract.exe" : "tesseract";
+        execSync(`${tesseractBin} --version`, { stdio: "ignore" });
+        const ocrResult = execSync(`${tesseractBin} "${filePath}" stdout 2>${process.platform === "win32" ? "NUL" : "/dev/null"}`, {
+          encoding: "utf-8",
+          maxBuffer: 10 * 1024 * 1024,
+          timeout: 300_000,
+        }).trim();
+        if (ocrResult.length > 0) baseText = ocrResult;
+      } catch {
+        // tesseract not installed or failed
+      }
+    }
+
+    if (!baseText) {
+      throw new Error(
+        `PDF extraction failed for ${filePath}. Tried: unpdf, pdf-parse, pandoc, tesseract. ` +
+        `The PDF may be scanned images only. Install tesseract for OCR support.`
+      );
+    }
+
+    // Vision enhancement is skipped during normal ingest for speed.
+    // Run separately via CLI: npx tsx scripts/vision-enhance.ts <contract_id>
+    return { text: baseText, visionPages: [] };
   }
 
   if (ext === ".txt") {
-    return fs.readFileSync(filePath, "utf-8").trim();
+    return { text: fs.readFileSync(filePath, "utf-8").trim(), visionPages: [] };
   }
 
   throw new Error(`Unsupported file type: ${ext}`);
@@ -190,18 +224,19 @@ export async function ingestFile(
   fileBuffer: Buffer,
   originalFileName: string,
   contractsDir: string,
+  projectId?: number,
 ): Promise<IngestResult> {
   // Save uploaded file to contracts/ directory, then delegate to unified path
   const destPath = path.join(contractsDir, originalFileName);
   fs.writeFileSync(destPath, fileBuffer);
-  return ingestFromPath(destPath);
+  return ingestFromPath(destPath, projectId);
 }
 
 // ---------------------------------------------------------------------------
 // Ingest from filesystem path (unified path for npm run ingest + demo)
 // ---------------------------------------------------------------------------
 
-export async function ingestFromPath(filePath: string): Promise<IngestResult> {
+export async function ingestFromPath(filePath: string, projectId?: number): Promise<IngestResult> {
   const fileName = path.basename(filePath);
   const fileBuffer = fs.readFileSync(filePath);
   const fileHash = computeFileHash(fileBuffer);
@@ -224,8 +259,11 @@ export async function ingestFromPath(filePath: string): Promise<IngestResult> {
 
   // Extract text
   let rawText: string;
+  let visionPages: number[] = [];
   try {
-    rawText = await extractText(filePath);
+    const result = await extractText(filePath);
+    rawText = result.text;
+    visionPages = result.visionPages;
   } catch (err) {
     return {
       id: "",
@@ -251,8 +289,8 @@ export async function ingestFromPath(filePath: string): Promise<IngestResult> {
   const contractType = knownMeta?.type ?? "technology_license";
 
   db.prepare(`
-    INSERT INTO contracts (id, name, type, file_path, file_hash, raw_text, status, needs_review)
-    VALUES (?, ?, ?, ?, ?, ?, 'Active', 1)
+    INSERT INTO contracts (id, name, type, file_path, file_hash, raw_text, project_id, status, needs_review)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', 1)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       type = excluded.type,
@@ -261,7 +299,19 @@ export async function ingestFromPath(filePath: string): Promise<IngestResult> {
       raw_text = excluded.raw_text,
       needs_review = 1,
       updated_at = datetime('now')
-  `).run(contractId, contractName, contractType, filePath, fileHash, rawText);
+  `).run(contractId, contractName, contractType, filePath, fileHash, rawText, projectId ?? null);
+
+  // Create Review Note if Vision was used
+  if (visionPages.length > 0) {
+    const pageList = visionPages.join(", ");
+    db.prepare(`
+      INSERT INTO review_notes (contract_id, type, category, issue, severity, is_reviewed, narrative, created_at, updated_at)
+      VALUES (?, 'vision_enhanced', 'system', ?, 'medium', 0, '', datetime('now'), datetime('now'))
+    `).run(
+      contractId,
+      `Pages ${pageList} contained image-only content (tables/figures). Text was extracted via Claude Vision OCR. Manual verification of extracted tables recommended.`,
+    );
+  }
 
   return {
     id: contractId,
@@ -269,11 +319,12 @@ export async function ingestFromPath(filePath: string): Promise<IngestResult> {
     status: isUpdate ? "updated" : "new",
     message: isUpdate
       ? `Updated contract ${contractId} with new content`
-      : `Created contract ${contractId}: ${contractName}`,
+      : `Created contract ${contractId}: ${contractName}` +
+        (visionPages.length > 0 ? ` (Vision-enhanced: pages ${visionPages.join(", ")})` : ""),
   };
 }
 
-export async function ingestAllContracts(contractsDir: string): Promise<IngestResult[]> {
+export async function ingestAllContracts(contractsDir: string, projectId?: number): Promise<IngestResult[]> {
   const files = fs.readdirSync(contractsDir).filter((f) =>
     /\.(docx|doc|pdf|txt)$/i.test(f)
   );
@@ -288,7 +339,7 @@ export async function ingestAllContracts(contractsDir: string): Promise<IngestRe
   const results: IngestResult[] = [];
   for (const file of files) {
     const filePath = path.join(contractsDir, file);
-    const result = await ingestFromPath(filePath);
+    const result = await ingestFromPath(filePath, projectId);
     results.push(result);
 
     const tag = result.status === "error" ? "ERR" : result.status === "skipped" ? "SKIP" : "OK";
