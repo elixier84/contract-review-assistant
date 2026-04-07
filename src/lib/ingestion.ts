@@ -5,7 +5,7 @@ import path from "path";
 import { extractText as extractPdfText } from "unpdf";
 import pdfParse from "pdf-parse";
 import { getDb } from "./db";
-import { enhancePdfWithVision } from "./vision-enhance";
+import { analyzePages } from "./vision-enhance";
 
 // Portable pandoc path (no admin install needed)
 const PANDOC_BIN = (() => {
@@ -74,6 +74,7 @@ function computeFileHashFromPath(filePath: string): string {
 interface ExtractResult {
   text: string;
   visionPages: number[];
+  filePath?: string;
 }
 
 export async function extractText(filePath: string): Promise<ExtractResult> {
@@ -148,9 +149,8 @@ export async function extractText(filePath: string): Promise<ExtractResult> {
       );
     }
 
-    // Vision enhancement is skipped during normal ingest for speed.
-    // Run separately via CLI: npx tsx scripts/vision-enhance.ts <contract_id>
-    return { text: baseText, visionPages: [] };
+      // Store page-level parser results (Vision runs later during analyze)
+    return { text: baseText, visionPages: [], filePath };
   }
 
   if (ext === ".txt") {
@@ -300,6 +300,32 @@ export async function ingestFromPath(filePath: string, projectId?: number): Prom
       needs_review = 1,
       updated_at = datetime('now')
   `).run(contractId, contractName, contractType, filePath, fileHash, rawText, projectId ?? null);
+
+  // Store page-level parser data for PDFs
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".pdf") {
+    try {
+      const pageAnalysis = await analyzePages(filePath);
+      const upsertPage = db.prepare(`
+        INSERT INTO contract_pages (contract_id, page_number, source, text, char_count, is_empty, updated_at)
+        VALUES (?, ?, 'parser', ?, ?, ?, datetime('now'))
+        ON CONFLICT(contract_id, page_number) DO UPDATE SET
+          source = 'parser', text = excluded.text, char_count = excluded.char_count,
+          is_empty = excluded.is_empty, updated_at = datetime('now')
+      `);
+      const tx = db.transaction(() => {
+        for (const p of pageAnalysis) {
+          upsertPage.run(contractId, p.page, p.text, p.textLength, p.textLength < 100 ? 1 : 0);
+        }
+      });
+      tx();
+      const emptyCount = pageAnalysis.filter((p) => p.textLength < 100).length;
+      const coverage = Math.round(((pageAnalysis.length - emptyCount) / pageAnalysis.length) * 100);
+      console.log(`    Pages: ${pageAnalysis.length} total, ${emptyCount} empty → coverage ${coverage}%`);
+    } catch (err) {
+      console.warn(`    [Pages] Failed to store page data: ${err instanceof Error ? err.message.slice(0, 100) : err}`);
+    }
+  }
 
   // Create Review Note if Vision was used
   if (visionPages.length > 0) {

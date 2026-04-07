@@ -34,3 +34,10 @@ docs/.bkit-memory.json
 docs/.pdca-snapshots/
 docs/.pdca-status.json
 .gstack/
+.claude/
+
+# portable tools (download separately per machine)
+tools/pandoc-*/
+tools/poppler-*/
+tools/tmp_*/
+tools/*.png

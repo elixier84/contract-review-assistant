@@ -28,6 +28,10 @@ export default function TimelineView({ projectId }: { projectId?: number | null 
   const [contracts, setContracts] = useState<Contract[]>([]);
   const [relationships, setRelationships] = useState<Relationship[]>([]);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const [panStart, setPanStart] = useState({ x: 0, y: 0 });
 
   useEffect(() => {
     const qs = projectId ? `?project_id=${projectId}` : "";
@@ -174,10 +178,54 @@ export default function TimelineView({ projectId }: { projectId?: number | null 
 
   const svgH = currentY + 20;
 
+  const handleWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -0.1 : 0.1;
+    setZoom(z => Math.min(3, Math.max(0.3, z + delta)));
+  };
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (e.button === 0) {
+      setIsPanning(true);
+      setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+    }
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (isPanning) {
+      setPan({ x: e.clientX - panStart.x, y: e.clientY - panStart.y });
+    }
+  };
+
+  const handleMouseUp = () => setIsPanning(false);
+
+  const resetView = () => { setZoom(1); setPan({ x: 0, y: 0 }); };
+
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-      <div className="overflow-x-auto">
-        <svg viewBox={`0 0 ${svgW} ${svgH}`} className="w-full" style={{ minHeight: Math.max(300, svgH * 0.6) }}>
+      <div className="flex items-center justify-end gap-1 px-4 pt-3 pb-1">
+        <button onClick={() => setZoom(z => Math.max(0.3, z - 0.2))} className="w-7 h-7 flex items-center justify-center rounded-lg bg-white border border-slate-200 text-slate-500 hover:bg-slate-100 text-sm font-bold">−</button>
+        <button onClick={resetView} className="px-2 h-7 flex items-center justify-center rounded-lg bg-white border border-slate-200 text-slate-400 hover:bg-slate-100 text-[10px] font-bold min-w-[44px]">{Math.round(zoom * 100)}%</button>
+        <button onClick={() => setZoom(z => Math.min(3, z + 0.2))} className="w-7 h-7 flex items-center justify-center rounded-lg bg-white border border-slate-200 text-slate-500 hover:bg-slate-100 text-sm font-bold">+</button>
+      </div>
+      <div
+        className="overflow-hidden"
+        style={{ cursor: isPanning ? "grabbing" : "grab" }}
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+      >
+        <svg
+          viewBox={`0 0 ${svgW} ${svgH}`}
+          style={{
+            width: svgW * zoom,
+            height: Math.max(300, svgH * 0.6) * zoom,
+            transform: `translate(${pan.x}px, ${pan.y}px)`,
+            transition: isPanning ? "none" : "transform 0.1s",
+          }}
+        >
           <defs>
             <filter id="bar-shadow" x="-2%" y="-20%" width="104%" height="140%">
               <feDropShadow dx="0" dy="1" stdDeviation="2" floodOpacity="0.1" />

@@ -35,6 +35,9 @@ function ContractRow({ contract, isChild, isExpandable, isExpanded, onToggle, on
           )}
           <div>
             <div className="font-bold text-sm text-slate-900">{contract.id}: {contract.name}</div>
+            {contract.file_path && (
+              <div className="text-[10px] text-slate-400 font-mono tracking-tight mt-0.5 truncate max-w-[400px]">{contract.file_path.split(/[/\\]/).pop()}</div>
+            )}
             <div className="text-[10px] text-slate-400 font-mono tracking-tight mt-0.5 flex items-center gap-1.5">
               <Link size={10} /> {contract.type}
               {contract.analysis_confidence !== null && (

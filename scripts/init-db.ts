@@ -155,6 +155,20 @@ CREATE TABLE review_notes (
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
+
+CREATE TABLE contract_pages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    contract_id TEXT NOT NULL REFERENCES contracts(id),
+    page_number INTEGER NOT NULL,
+    source TEXT NOT NULL DEFAULT 'parser',     -- 'parser', 'vision', 'manual'
+    text TEXT NOT NULL DEFAULT '',
+    char_count INTEGER NOT NULL DEFAULT 0,
+    is_empty BOOLEAN NOT NULL DEFAULT 1,
+    confidence REAL,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(contract_id, page_number)
+);
 `;
 
 db.exec(schema);

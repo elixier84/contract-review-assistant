@@ -30,7 +30,7 @@ export function generateHtmlReport(dbPath?: string, projectId?: number): { html:
   const contracts = db.prepare(`
     SELECT id, name, type, status, effective_date, expiry_date,
            parent_id, licensed_technology, territory, initial_fee,
-           analysis_confidence, needs_review
+           analysis_confidence, needs_review, file_path
     FROM contracts${pf} ORDER BY id
   `).all(...pp);
 
@@ -41,9 +41,29 @@ export function generateHtmlReport(dbPath?: string, projectId?: number): { html:
   const patents = db.prepare(`SELECT * FROM patents${cf} ORDER BY contract_id, country`).all(...pp);
   const products = db.prepare(`SELECT * FROM licensed_products${cf} ORDER BY contract_id`).all(...pp);
   const reviewNotes = db.prepare(`SELECT * FROM review_notes${cf} ORDER BY severity DESC, created_at DESC`).all(...pp);
-  const technologies = projectId
-    ? db.prepare(`SELECT DISTINCT t.* FROM technologies t JOIN tech_contract_map tcm ON tcm.tech_id = t.id JOIN contracts c ON c.id = tcm.contract_id WHERE c.project_id = ? ORDER BY t.name`).all(projectId)
-    : db.prepare(`SELECT * FROM technologies ORDER BY name`).all();
+  const rawTechnologies = projectId
+    ? db.prepare(`SELECT DISTINCT t.* FROM technologies t JOIN tech_contract_map tcm ON tcm.tech_id = t.id JOIN contracts c ON c.id = tcm.contract_id WHERE c.project_id = ? ORDER BY t.name`).all(projectId) as Record<string, unknown>[]
+    : db.prepare(`SELECT * FROM technologies ORDER BY name`).all() as Record<string, unknown>[];
+
+  // Enrich technologies with contracts, patents, products (matching /api/technologies)
+  const technologies = rawTechnologies.map((tech) => {
+    const techContracts = db.prepare(
+      `SELECT tcm.role, c.id, c.name, c.type, c.status
+       FROM tech_contract_map tcm
+       JOIN contracts c ON c.id = tcm.contract_id
+       WHERE tcm.tech_id = ?
+       ORDER BY tcm.role, c.id`
+    ).all(tech.id);
+    const techPatents = db.prepare(
+      `SELECT country, patent_number, is_application
+       FROM patents WHERE technology = ? ORDER BY country`
+    ).all(tech.name);
+    const techProducts = db.prepare(
+      `SELECT product_type, category, contract_id
+       FROM licensed_products WHERE technology = ?`
+    ).all(tech.name);
+    return { ...tech, contracts: techContracts, patents: techPatents, products: techProducts };
+  });
 
   // Fetch project info
   let projectRow: Record<string, unknown> | undefined;
@@ -117,6 +137,12 @@ export function generateHtmlReport(dbPath?: string, projectId?: number): { html:
   .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,.05); }
   .card-3xl { background: #fff; border: 1px solid #e2e8f0; border-radius: 24px; overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,.05); }
   .card-header { padding: 20px 24px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; font-weight: 900; font-size: 14px; color: #334155; display: flex; align-items: center; gap: 8px; }
+  .zoom-controls { display: inline-flex; align-items: center; gap: 4px; }
+  .zoom-btn { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 8px; background: #fff; border: 1px solid #e2e8f0; color: #64748b; cursor: pointer; font-size: 14px; font-weight: 700; }
+  .zoom-btn:hover { background: #f1f5f9; }
+  .zoom-pct { min-width: 44px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 8px; background: #fff; border: 1px solid #e2e8f0; color: #94a3b8; font-size: 10px; font-weight: 700; cursor: pointer; }
+  .svg-pan-wrap { position: relative; }
+  .svg-pan-wrap svg { transition: transform 0.1s; transform-origin: 0 0; }
   .card-body { padding: 24px; }
   .card + .card, .card-3xl + .card-3xl, .card + .card-3xl, .card-3xl + .card { margin-top: 16px; }
 
@@ -378,6 +404,8 @@ const ICONS = {
   alertTriangle: '<svg width="SIZE" height="SIZE" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>',
   messageSquare: '<svg width="SIZE" height="SIZE" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
   fileText: '<svg width="SIZE" height="SIZE" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>',
+  fileQuestion: '<svg width="SIZE" height="SIZE" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17h.01"/><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M9.1 9a3 3 0 0 1 5.82 1c0 2-3 3-3 3"/></svg>',
+  settings: '<svg width="SIZE" height="SIZE" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>',
 };
 
 function icon(name, size) {
@@ -386,6 +414,14 @@ function icon(name, size) {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+function contractFileName(id) {
+  var c = DATA.contracts.find(function(x) { return x.id === id; });
+  return c && c.file_path ? c.file_path.replace(/.*[\\/\\\\]/, '') : null;
+}
+function contractLabel(id) {
+  var fn = contractFileName(id);
+  return '<div><div style="font-weight:700">' + esc(id) + '</div>' + (fn ? '<div style="font-size:9px;color:#94a3b8;font-family:ui-monospace,monospace;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(fn) + '</div>' : '') + '</div>';
+}
 function fmtDate(d) {
   if (!d) return "";
   const dt = new Date(d);
@@ -468,7 +504,8 @@ document.getElementById("tabs").addEventListener("click", function(e) {
   h += '<div class="card" style="border-radius:16px"><div style="padding:24px"><h3 style="font-weight:700;color:#334155;display:flex;align-items:center;gap:8px;border-bottom:1px solid #e2e8f0;padding-bottom:16px;margin-bottom:16px"><span style="color:#f59e0b">' + icon("bell", 18) + '</span> Contracts in Scope</h3>';
   h += '<div class="space-y-3">';
   for (const c of DATA.contracts) {
-    h += '<div class="scope-card"><div style="display:flex;align-items:center;gap:12px;overflow:hidden;text-align:left"><span style="color:#22c55e;flex-shrink:0">' + icon("checkCircle", 14) + '</span><div class="name">' + esc(c.id) + ': ' + esc(c.name) + '</div></div>';
+    var fn = c.file_path ? c.file_path.replace(/.*[/\\\\]/, '') : null;
+    h += '<div class="scope-card"><div style="display:flex;align-items:center;gap:12px;overflow:hidden;text-align:left"><span style="color:#22c55e;flex-shrink:0">' + icon("checkCircle", 14) + '</span><div><div class="name">' + esc(c.id) + ': ' + esc(c.name) + '</div>' + (fn ? '<div style="font-size:10px;color:#94a3b8;font-family:ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(fn) + '</div>' : '') + '</div></div>';
     h += '<span style="font-size:8px;padding:2px 8px;border-radius:4px;font-weight:900;text-transform:uppercase;background:#22c55e;color:#fff;white-space:nowrap">' + esc(c.type) + '</span></div>';
   }
   h += '</div></div></div>';
@@ -512,7 +549,7 @@ document.getElementById("tabs").addEventListener("click", function(e) {
       if (kt.notice_period_days) terms.push(kt.notice_period_days + "d notice");
       if (kt.frequency) terms.push(kt.frequency);
       if (kt.retention_years) terms.push(kt.retention_years + "yr retention");
-      h += '<tr><td style="font-weight:700">' + esc(c.contract_id) + '</td><td style="font-family:ui-monospace,monospace;color:#64748b">' + esc(c.section) + '</td><td style="color:#64748b">' + esc(terms.join(", ")) + '</td></tr>';
+      h += '<tr><td>' + contractLabel(c.contract_id) + '</td><td style="font-family:ui-monospace,monospace;color:#64748b">' + esc(c.section) + '</td><td style="color:#64748b">' + esc(terms.join(", ")) + '</td></tr>';
     }
   } else {
     h += '<tr><td colspan="3" class="empty-notice">Run analysis to populate clauses</td></tr>';
@@ -528,7 +565,7 @@ document.getElementById("tabs").addEventListener("click", function(e) {
   h += '<table style="font-size:12px"><tbody>';
   for (const c of retentionClauses) {
     const kt = parseJSON(c.key_terms_json) || {};
-    h += '<tr><td style="padding:12px 16px;font-weight:700;color:#334155">' + esc(c.contract_id) + '</td><td style="padding:12px 16px;color:#64748b">' + (kt.retention_years ? kt.retention_years + " Years" : esc(c.section)) + '</td>';
+    h += '<tr><td style="padding:12px 16px">' + contractLabel(c.contract_id) + '</td><td style="padding:12px 16px;color:#64748b">' + (kt.retention_years ? kt.retention_years + " Years" : esc(c.section)) + '</td>';
     h += '<td style="padding:12px 16px;text-align:right"><span style="color:#94a3b8;cursor:pointer">' + icon("link", 14) + '</span></td></tr>';
   }
   if (!retentionClauses.length) h += '<tr><td colspan="3" style="padding:24px;text-align:center;color:#94a3b8;font-style:italic;font-size:11px">Pending analysis</td></tr>';
@@ -540,7 +577,7 @@ document.getElementById("tabs").addEventListener("click", function(e) {
   h += '<table style="font-size:12px"><tbody>';
   for (const c of interestClauses) {
     const kt = parseJSON(c.key_terms_json) || {};
-    h += '<tr><td style="padding:12px 16px;font-weight:700;color:#334155">' + esc(c.contract_id) + '</td><td style="padding:12px 16px;color:#64748b">' + esc(kt.rate || kt.interest_rate || c.section) + '</td>';
+    h += '<tr><td style="padding:12px 16px">' + contractLabel(c.contract_id) + '</td><td style="padding:12px 16px;color:#64748b">' + esc(kt.rate || kt.interest_rate || c.section) + '</td>';
     h += '<td style="padding:12px 16px;text-align:right"><span style="color:#94a3b8;cursor:pointer">' + icon("link", 14) + '</span></td></tr>';
   }
   if (!interestClauses.length) h += '<tr><td colspan="3" style="padding:24px;text-align:center;color:#94a3b8;font-style:italic;font-size:11px">Pending analysis</td></tr>';
@@ -642,30 +679,37 @@ document.getElementById("tabs").addEventListener("click", function(e) {
 
   // ── Timeline View ──
   h += '<div id="view-timeline" style="display:none">';
-  h += '<div class="card" style="border-radius:16px;overflow:hidden"><div class="card-header">Contract Timeline</div>';
+  h += '<div class="card" style="border-radius:16px;overflow:hidden">';
+  h += '<div class="card-header" style="display:flex;justify-content:space-between;align-items:center">Contract Timeline';
+  h += '<div class="zoom-controls" data-target="timeline-svg-wrap"></div>';
+  h += '</div>';
+  h += '<div id="timeline-svg-wrap" class="svg-pan-wrap" style="overflow:hidden;cursor:grab">';
   h += renderTimelineSVG();
-  h += '</div></div>';
+  h += '</div></div></div>';
 
   // ── Relationship View ──
   h += '<div id="view-relationship" style="display:none">';
-  h += '<div class="card" style="border-radius:16px;overflow:hidden"><div class="card-header" style="display:flex;justify-content:space-between;align-items:center">Contract Relationship Map';
+  h += '<div class="card" style="border-radius:16px;overflow:hidden"><div class="card-header" style="display:flex;justify-content:space-between;align-items:center"><span>Contract Relationship Map</span>';
+  h += '<div style="display:flex;align-items:center;gap:12px">';
   h += '<div style="display:flex;gap:12px;font-size:10px;font-weight:700;color:#94a3b8">';
   h += '<span style="display:flex;align-items:center;gap:4px"><span style="display:inline-block;width:12px;height:2px;background:#6366f1;border-radius:1px"></span>references T&C</span>';
   h += '<span style="display:flex;align-items:center;gap:4px"><span style="display:inline-block;width:12px;height:2px;background:#ef4444;border-radius:1px"></span>amends</span>';
   h += '<span style="display:flex;align-items:center;gap:4px"><span style="display:inline-block;width:12px;height:2px;background:#f59e0b;border-radius:1px"></span>pricing for</span>';
   h += '<span style="display:flex;align-items:center;gap:4px"><span style="display:inline-block;width:12px;height:2px;background:#8b5cf6;border-radius:1px"></span>related tech</span>';
-  h += '</div></div>';
-  h += renderRelationshipSVG();
   h += '</div>';
+  h += '<div class="zoom-controls" data-target="rel-svg-wrap"></div>';
+  h += '</div></div>';
+  h += '<div id="rel-svg-wrap" class="svg-pan-wrap" style="overflow:hidden;cursor:grab">';
+  h += renderRelationshipSVG();
+  h += '</div></div>';
 
   // Relationships table
   if (DATA.relationships.length) {
     h += '<div class="card" style="margin-top:16px;border-radius:16px;overflow:hidden"><div class="card-header">Contract Relationships (' + DATA.relationships.length + ')</div>';
-    h += '<table><thead><tr><th>Source</th><th>Target</th><th>Type</th><th>Evidence</th><th>Confidence</th></tr></thead><tbody>';
+    h += '<table><thead><tr><th>Source</th><th>Target</th><th>Type</th><th>Confidence</th></tr></thead><tbody>';
     for (const r of DATA.relationships) {
-      h += '<tr><td style="font-weight:700">' + esc(r.source_id) + '</td><td style="font-weight:700">' + esc(r.target_id) + '</td>';
+      h += '<tr><td>' + contractLabel(r.source_id) + '</td><td>' + contractLabel(r.target_id) + '</td>';
       h += '<td><span class="badge badge-blue">' + esc(r.type) + '</span></td>';
-      h += '<td style="font-size:12px;max-width:300px">' + esc(r.evidence_text || "") + '</td>';
       h += '<td>' + confBadge(r.confidence) + '</td></tr>';
     }
     h += '</tbody></table></div>';
@@ -701,17 +745,81 @@ function renderRelationshipSVG() {
   const edgeColors = { references_tc: "#6366f1", amends: "#ef4444", pricing_for: "#f59e0b", related_technology: "#8b5cf6" };
   const edgeLabels = { references_tc: "references T&C", amends: "amends", pricing_for: "pricing for", related_technology: "related tech" };
 
-  const svgW = 800, svgH = 440, nodeW = 220, nodeH = 70;
-  const nodes = [];
+  const nodeW = 180, nodeH = 65, padding = 60;
 
-  const master = DATA.contracts.find(c => c.type === "master_tc" || !c.parent_id);
-  const techLicenses = DATA.contracts.filter(c => c.type === "technology_license");
-  const sideLetter = DATA.contracts.find(c => c.type === "side_letter");
+  // Force-directed layout — wide spread for readability (zoom available)
+  const cx = 800, cy = 600;
+  const radius = Math.max(500, DATA.contracts.length * 70);
+  const positions = DATA.contracts.map((_, i) => ({
+    x: cx + radius * Math.cos((2 * Math.PI * i) / DATA.contracts.length - Math.PI / 2),
+    y: cy + radius * Math.sin((2 * Math.PI * i) / DATA.contracts.length - Math.PI / 2),
+  }));
 
-  if (master) nodes.push({ id: master.id, name: master.id + ": " + master.name, type: master.type, x: svgW/2-nodeW/2, y: 30, w: nodeW, h: nodeH });
-  const spacing = 280, startX = svgW/2 - ((techLicenses.length-1)*spacing)/2 - nodeW/2;
-  techLicenses.forEach((c, i) => nodes.push({ id: c.id, name: c.id + ": " + c.name, type: c.type, x: startX + i*spacing, y: 180, w: nodeW, h: nodeH }));
-  if (sideLetter && !nodes.find(n => n.id === sideLetter.id)) nodes.push({ id: sideLetter.id, name: sideLetter.id + ": " + sideLetter.name, type: sideLetter.type, x: svgW/2-nodeW/2, y: 330, w: nodeW, h: nodeH });
+  const idToIdx = {};
+  DATA.contracts.forEach((c, i) => { idToIdx[c.id] = i; });
+  const simEdges = DATA.relationships
+    .map(r => ({ s: idToIdx[r.source_id], t: idToIdx[r.target_id] }))
+    .filter(e => e.s !== undefined && e.t !== undefined);
+
+  for (let iter = 0; iter < 200; iter++) {
+    const fx = new Array(DATA.contracts.length).fill(0);
+    const fy = new Array(DATA.contracts.length).fill(0);
+    // Repulsion between all pairs
+    for (let i = 0; i < DATA.contracts.length; i++) {
+      for (let j = i + 1; j < DATA.contracts.length; j++) {
+        let dx = positions[i].x - positions[j].x;
+        let dy = positions[i].y - positions[j].y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const repulse = 500000 / (dist * dist);
+        dx = (dx / dist) * repulse;
+        dy = (dy / dist) * repulse;
+        fx[i] += dx; fy[i] += dy;
+        fx[j] -= dx; fy[j] -= dy;
+      }
+    }
+    // Attraction along edges
+    for (const e of simEdges) {
+      let dx = positions[e.t].x - positions[e.s].x;
+      let dy = positions[e.t].y - positions[e.s].y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const attract = (dist - 500) * 0.01;
+      dx = (dx / dist) * attract;
+      dy = (dy / dist) * attract;
+      fx[e.s] += dx; fy[e.s] += dy;
+      fx[e.t] -= dx; fy[e.t] -= dy;
+    }
+    // Center gravity
+    for (let i = 0; i < DATA.contracts.length; i++) {
+      fx[i] += (cx - positions[i].x) * 0.005;
+      fy[i] += (cy - positions[i].y) * 0.005;
+    }
+    // Apply forces with damping
+    const damping = 1 - iter / 250;
+    for (let i = 0; i < DATA.contracts.length; i++) {
+      positions[i].x += fx[i] * 0.1 * damping;
+      positions[i].y += fy[i] * 0.1 * damping;
+    }
+  }
+
+  // Normalize positions
+  const minX = Math.min(...positions.map(p => p.x)) - nodeW / 2;
+  const minY = Math.min(...positions.map(p => p.y)) - nodeH / 2;
+  positions.forEach(p => { p.x -= minX - padding; p.y -= minY - padding; });
+
+  const nodes = DATA.contracts.map((c, i) => ({
+    id: c.id,
+    name: c.id + ": " + (c.name || "").slice(0, 28),
+    type: c.type,
+    x: positions[i].x - nodeW / 2,
+    y: positions[i].y - nodeH / 2,
+    w: nodeW,
+    h: nodeH,
+  }));
+
+  const maxX = Math.max(...nodes.map(n => n.x + n.w)) + 40;
+  const maxY = Math.max(...nodes.map(n => n.y + n.h)) + 40;
+  const svgW = Math.max(800, maxX);
+  const svgH = Math.max(460, maxY);
 
   const edgeMap = new Map();
   for (const r of DATA.relationships) {
@@ -728,7 +836,7 @@ function renderRelationshipSVG() {
     return { x: cx+cos*s, y: cy+sin*s };
   }
 
-  let svg = '<svg viewBox="0 0 '+svgW+' '+svgH+'" style="width:100%;min-height:360px">';
+  let svg = '<svg viewBox="0 0 '+svgW+' '+svgH+'" style="width:'+svgW+'px;height:'+svgH+'px;min-width:100%">';
   svg += '<defs>';
   for (const [t,c] of Object.entries(edgeColors)) svg += '<marker id="arr-'+t+'" viewBox="0 0 10 6" refX="9" refY="3" markerWidth="8" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 3L0 6z" fill="'+c+'"/></marker>';
   svg += '<filter id="ns" x="-4%" y="-4%" width="108%" height="116%"><feDropShadow dx="0" dy="1" stdDeviation="3" floodOpacity="0.08"/></filter></defs>';
@@ -766,8 +874,8 @@ function renderRelationshipSVG() {
 
 // ── SVG: Timeline Chart ─────────────────────────────────────────────────────
 function renderTimelineSVG() {
-  const typeColors = { master_tc: "#2563eb", technology_license: "#059669", side_letter: "#d97706" };
-  const typeLabels = { master_tc: "Master T&C", technology_license: "Tech License", side_letter: "Side Letter" };
+  const typeColors = { master_tc: "#2563eb", technology_license: "#059669", side_letter: "#d97706", amendment: "#64748b", extension: "#64748b" };
+  const typeLabels = { master_tc: "Master T&C", technology_license: "Tech License", side_letter: "Side Letter", amendment: "Amendment", extension: "Extension" };
 
   const dates = DATA.contracts.flatMap(c => [c.effective_date, c.expiry_date].filter(Boolean));
   const times = dates.map(d => new Date(d).getTime());
@@ -783,20 +891,70 @@ function renderTimelineSVG() {
   const getX = (ds, w) => ((new Date(ds).getTime() - startTime) / totalDur) * w;
 
   const svgW = 1000, rowH = 50, headerH = 35;
-  const tMasters = DATA.contracts.filter(c => !c.parent_id && c.type === "master_tc");
+
+  // Build hierarchy from relationships (matching TimelineView.tsx)
+  const parentLookup = {};
+  for (const r of DATA.relationships) {
+    if (r.type === "references_tc" && !parentLookup[r.source_id]) {
+      parentLookup[r.source_id] = r.target_id;
+    }
+  }
+  const contractById = {};
+  DATA.contracts.forEach(c => { contractById[c.id] = c; });
+
+  // Resolve effective date: own date → parent's date
+  const resolveEffDate = (c) => {
+    if (c.effective_date) return c.effective_date;
+    const pid = parentLookup[c.id];
+    if (pid && contractById[pid] && contractById[pid].effective_date) return contractById[pid].effective_date;
+    return null;
+  };
+
+  const inboundCount = {};
+  const childToParent = {};
+  for (const r of DATA.relationships) {
+    if (r.type === "references_tc" || r.type === "amends") {
+      inboundCount[r.target_id] = (inboundCount[r.target_id] || 0) + 1;
+    }
+    if (r.type === "references_tc" && !childToParent[r.source_id]) {
+      childToParent[r.source_id] = r.target_id;
+    }
+  }
+  for (const c of DATA.contracts) {
+    if (c.parent_id && !childToParent[c.id]) childToParent[c.id] = c.parent_id;
+  }
+
+  const parentIds = new Set(Object.values(childToParent));
+  const sortedParents = DATA.contracts
+    .filter(c => parentIds.has(c.id))
+    .sort((a, b) => (inboundCount[b.id] || 0) - (inboundCount[a.id] || 0));
+
+  const groups = [];
+  for (const parent of sortedParents) {
+    const children = DATA.contracts
+      .filter(c => childToParent[c.id] === parent.id && c.id !== parent.id)
+      .sort((a, b) => (resolveEffDate(a) || "9999").localeCompare(resolveEffDate(b) || "9999"));
+    groups.push({ master: parent, children });
+  }
+
+  const groupedIds = new Set(groups.flatMap(g => [g.master.id, ...g.children.map(c => c.id)]));
+  const ungrouped = DATA.contracts
+    .filter(c => !groupedIds.has(c.id))
+    .sort((a, b) => (resolveEffDate(a) || "9999").localeCompare(resolveEffDate(b) || "9999"));
+  if (ungrouped.length) groups.push({ master: null, children: ungrouped });
+
   const rows = [];
   let curY = headerH + 10;
-
-  for (const m of tMasters) {
-    rows.push({ c: m, y: curY, isChild: false });
-    curY += rowH;
-    const children = DATA.contracts.filter(c => c.parent_id === m.id);
-    for (const ch of children) { rows.push({ c: ch, y: curY, isChild: true }); curY += rowH; }
+  for (const group of groups) {
+    if (group.master) {
+      rows.push({ c: group.master, y: curY, isChild: false });
+      curY += rowH;
+    }
+    for (const child of group.children) {
+      rows.push({ c: child, y: curY, isChild: true });
+      curY += rowH;
+    }
     curY += 12;
-  }
-  const grouped = new Set(rows.map(r => r.c.id));
-  for (const c of DATA.contracts) {
-    if (!grouped.has(c.id)) { rows.push({ c, y: curY, isChild: false }); curY += rowH; }
   }
 
   const svgH = curY + 20;
@@ -818,19 +976,28 @@ function renderTimelineSVG() {
 
   for (const row of rows) {
     const c = row.c;
-    if (!c.effective_date) continue;
+    const barH = row.isChild ? 18 : 24;
+    const barY = row.y + (rowH - barH) / 2;
+    const label = c.id + ": " + (c.name.length > 30 ? c.name.slice(0,30)+"..." : c.name);
+
+    if (!c.effective_date) {
+      // No effective date — show as gray bar spanning full width with "DATE UNKNOWN" label
+      if (row.isChild) svg += '<line x1="14" y1="'+(row.y-8)+'" x2="14" y2="'+(barY+barH/2)+'" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="3,2"/>';
+      svg += '<rect x="20" y="'+barY+'" width="'+(svgW-40)+'" height="'+barH+'" rx="'+(barH/2)+'" fill="#cbd5e1" opacity="0.4"/>';
+      svg += '<text x="34" y="'+(barY+barH/2+(row.isChild?3.5:4))+'" font-size="'+(row.isChild?9:11)+'" font-weight="800" fill="#64748b">'+esc(label)+'</text>';
+      svg += '<text x="'+(svgW-80)+'" y="'+(barY+barH/2+3)+'" font-size="8" font-weight="700" fill="#94a3b8">DATE UNKNOWN</text>';
+      continue;
+    }
+
     const color = typeColors[c.type] || "#64748b";
     const barX = getX(c.effective_date, svgW);
     const barEndX = c.expiry_date ? getX(c.expiry_date, svgW) : svgW - 20;
     const barW = Math.max(barEndX - barX, 8);
-    const barH = row.isChild ? 18 : 24;
-    const barY = row.y + (rowH - barH) / 2;
 
     if (row.isChild) svg += '<line x1="'+(barX-6)+'" y1="'+(row.y-8)+'" x2="'+(barX-6)+'" y2="'+(barY+barH/2)+'" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="3,2"/>';
     svg += '<rect x="'+barX+'" y="'+barY+'" width="'+barW+'" height="'+barH+'" rx="'+(barH/2)+'" fill="'+color+'" opacity="0.8"/>';
     if (!c.expiry_date) svg += '<text x="'+(barX+barW+4)+'" y="'+(barY+barH/2+3)+'" font-size="10" fill="#94a3b8" font-weight="700">&#x2192; Open</text>';
 
-    const label = c.id + ": " + (c.name.length > 30 ? c.name.slice(0,30)+"..." : c.name);
     svg += '<text x="'+(barX+10)+'" y="'+(barY+barH/2+(row.isChild?3.5:4))+'" font-size="'+(row.isChild?9:11)+'" font-weight="800" fill="#fff">'+esc(label)+'</text>';
   }
 
@@ -841,6 +1008,10 @@ function renderTimelineSVG() {
     svg += '<text x="'+(lx+14)+'" y="4" font-size="10" font-weight="700" fill="#94a3b8">'+label+'</text>';
     lx += label.length * 7 + 30;
   }
+  if (todayX > 0 && todayX < svgW) {
+    svg += '<line x1="'+(svgW-120)+'" y1="0" x2="'+(svgW-100)+'" y2="0" stroke="#ef4444" stroke-width="2"/>';
+    svg += '<text x="'+(svgW-95)+'" y="4" font-size="10" font-weight="700" fill="#94a3b8">Today</text>';
+  }
   svg += '</g>';
 
   svg += '</svg>';
@@ -850,32 +1021,7 @@ function renderTimelineSVG() {
 // ── Render Technology — matches TechnologyView.tsx ──────────────────────────
 (function renderTechnology() {
   const el = document.getElementById("technology-content");
-  if (!DATA.contracts.length && !DATA.patents.length && !DATA.products.length) { el.innerHTML = '<div class="empty-notice">Run analysis to detect technologies</div>'; return; }
-  const techMap = new Map();
-
-  for (const c of DATA.contracts) {
-    if (c.licensed_technology) {
-      if (!techMap.has(c.licensed_technology)) techMap.set(c.licensed_technology, { name: c.licensed_technology, contracts: [], patents: [], products: [] });
-      techMap.get(c.licensed_technology).contracts.push({ id: c.id, name: c.name, type: c.type, status: c.status, role: "licensed_under" });
-    }
-  }
-  for (const p of DATA.pricingTables) {
-    if (p.technology) {
-      if (!techMap.has(p.technology)) techMap.set(p.technology, { name: p.technology, contracts: [], patents: [], products: [] });
-      const t = techMap.get(p.technology);
-      if (!t.contracts.find(x => x.id === p.contract_id)) {
-        const cn = DATA.contracts.find(c => c.id === p.contract_id);
-        t.contracts.push({ id: p.contract_id, name: cn ? cn.name : p.contract_id, type: cn ? cn.type : "", status: cn ? cn.status : "", role: "pricing_defined_in" });
-      }
-    }
-  }
-  // Add patents and products
-  for (const p of DATA.patents) {
-    if (p.technology && techMap.has(p.technology)) techMap.get(p.technology).patents.push(p);
-  }
-  for (const p of DATA.products) {
-    if (p.technology && techMap.has(p.technology)) techMap.get(p.technology).products.push(p);
-  }
+  if (!DATA.technologies.length) { el.innerHTML = '<div class="empty-notice">Run analysis to detect technologies</div>'; return; }
 
   let h = '<div class="space-y-6 animate-in" style="text-align:left">';
 
@@ -883,12 +1029,12 @@ function renderTimelineSVG() {
   h += '<div class="card-3xl" style="padding:24px;display:flex;align-items:center;gap:16px">';
   h += '<span style="color:#3b82f6">' + icon("layers", 24) + '</span>';
   h += '<div><h2 style="font-size:20px;font-weight:900;color:#1e293b;letter-spacing:-0.025em">Technology Inventory</h2>';
-  h += '<p style="font-size:12px;color:#94a3b8">' + techMap.size + ' technologies detected</p></div>';
+  h += '<p style="font-size:12px;color:#94a3b8">' + DATA.technologies.length + ' technologies detected</p></div>';
   h += '</div>';
 
   // Accordion cards — matches React accordion
   let techIdx = 0;
-  for (const [, tech] of techMap) {
+  for (const tech of DATA.technologies) {
     const accId = "tech-acc-" + techIdx++;
     h += '<div class="card-3xl" id="' + accId + '">';
 
@@ -949,7 +1095,7 @@ function renderTimelineSVG() {
     h += '</div>'; // end card
   }
 
-  if (!techMap.size) h += '<div class="card" style="border-radius:16px"><div class="card-body" class="empty-notice" style="text-align:center;color:#94a3b8;font-style:italic;padding:48px">Run analysis to detect technologies</div></div>';
+  if (!DATA.technologies.length) h += '<div class="card" style="border-radius:16px"><div class="card-body" class="empty-notice" style="text-align:center;color:#94a3b8;font-style:italic;padding:48px">Run analysis to detect technologies</div></div>';
   h += '</div>';
   el.innerHTML = h;
 })();
@@ -999,10 +1145,10 @@ function renderTimelineSVG() {
       h += '<div style="display:flex;align-items:center;justify-content:space-between">';
       h += '<div><div style="font-size:14px;font-weight:700;color:#334155">' + esc(t.name || t.technology) + '</div>';
       h += '<div style="font-size:10px;color:#94a3b8;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;margin-top:4px">' + esc(t.section || "") + (t.technology ? " | " + esc(t.technology) : "") + '</div></div>';
-      if (t.is_used_in_reports) {
-        h += '<span class="pill-badge pill-used">' + icon("activity", 10) + ' Used</span>';
-      } else {
-        h += '<span class="pill-badge pill-unused">' + icon("clock", 10) + ' Not Reported</span>';
+      if (t.confidence != null) {
+        var pct = (t.confidence * 100).toFixed(0);
+        var cls = t.confidence >= 0.8 ? "conf-green" : t.confidence >= 0.5 ? "conf-yellow" : "conf-red";
+        h += '<span class="conf-badge ' + cls + '" style="font-size:11px;padding:4px 10px">' + pct + '%</span>';
       }
       h += '</div>';
 
@@ -1013,7 +1159,7 @@ function renderTimelineSVG() {
         for (const tier of tiers) {
           h += '<tr><td>' + (tier.from != null ? Number(tier.from).toLocaleString() : "") + '</td>';
           h += '<td>' + (tier.to != null ? Number(tier.to).toLocaleString() : "+") + '</td>';
-          h += '<td style="text-align:right;color:#15803d;font-weight:700">$' + (tier.rate != null ? Number(tier.rate).toFixed(2) : "—") + '</td></tr>';
+          h += '<td style="text-align:right;color:#15803d;font-weight:700">$' + (tier.rate != null ? Number(tier.rate).toFixed(4) : "—") + '</td></tr>';
         }
         h += '</tbody></table>';
       }
@@ -1021,12 +1167,11 @@ function renderTimelineSVG() {
       // Discounts
       const discounts = parseJSON(t.discounts_json);
       if (discounts && discounts.length) {
-        h += '<div style="margin-top:16px"><div style="font-size:10px;font-weight:900;text-transform:uppercase;color:#94a3b8;letter-spacing:0.1em">Discounts</div>';
+        h += '<div style="margin-top:16px"><div style="font-size:10px;font-weight:900;text-transform:uppercase;color:#94a3b8;letter-spacing:0.1em;margin-bottom:8px">Discounts</div>';
         for (const d of discounts) {
-          h += '<div style="font-size:12px;color:#475569;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px 12px;margin-top:4px">';
-          h += '<span style="font-weight:700">' + esc(d.type || d.description || "") + '</span>';
-          if (d.amount) h += '<span style="color:#15803d;margin-left:8px">-$' + d.amount + '</span>';
-          if (d.condition || d.description) h += '<span style="color:#94a3b8;margin-left:8px">| ' + esc(d.condition || d.description) + '</span>';
+          h += '<div style="font-size:12px;color:#475569;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 14px;margin-top:6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">';
+          h += '<span style="font-weight:800;color:#334155;background:#fff;padding:2px 8px;border-radius:4px;border:1px solid #e2e8f0;font-size:11px">' + esc(d.type || "") + '</span>';
+          if (d.condition || d.description) h += '<span style="color:#64748b;font-size:12px">' + esc(d.condition || d.description) + '</span>';
           h += '</div>';
         }
         h += '</div>';
@@ -1075,7 +1220,7 @@ function renderTimelineSVG() {
     for (const d of filtered) {
       html += '<div class="def-card"><h3 class="def-term">' + esc(d.term) + '</h3>';
       html += '<p class="def-text">' + esc(d.definition) + '</p>';
-      html += '<div class="def-meta">' + esc(d.contract_id) + ' ' + esc(d.section || "") + '</div></div>';
+      html += '<div class="def-meta">' + esc(d.contract_id) + (contractFileName(d.contract_id) ? ' <span style="color:#cbd5e1;font-family:ui-monospace,monospace">' + esc(contractFileName(d.contract_id)) + '</span>' : '') + ' ' + esc(d.section || "") + '</div></div>';
     }
     if (!filtered.length) html += '<div style="text-align:center;color:#94a3b8;font-style:italic;padding:48px">No matching definitions</div>';
     html += '</div>';
@@ -1092,11 +1237,49 @@ function renderTimelineSVG() {
 (function renderNotes() {
   const el = document.getElementById("notes-content");
 
+  const CATEGORY_CONFIG = {
+    audit_finding: { label: "Audit Findings", color: "#b91c1c", bgColor: "background:#fef2f2;border-color:#fecaca", description: "Pricing conflicts, coverage gaps, date issues, definition mismatches" },
+    document_gap: { label: "Document Gaps", color: "#b45309", bgColor: "background:#fffbeb;border-color:#fde68a", description: "Missing referenced contracts, inherited clauses from parent agreements" },
+    system: { label: "System Notes", color: "#64748b", bgColor: "background:#f8fafc;border-color:#e2e8f0", description: "Vision OCR processing, extraction quality warnings" },
+    uncategorized: { label: "Other", color: "#64748b", bgColor: "background:#f8fafc;border-color:#e2e8f0", description: "Manual and uncategorized notes" },
+  };
+  const CAT_ORDER = ["audit_finding", "document_gap", "uncategorized", "system"];
+  const CAT_ICONS = { audit_finding: "shield", document_gap: "fileQuestion", system: "settings", uncategorized: "alertTriangle" };
+
+  // Count by category
+  const catCounts = {};
+  DATA.reviewNotes.forEach(n => {
+    const cat = n.category || "uncategorized";
+    catCounts[cat] = (catCounts[cat] || 0) + 1;
+  });
+
+  // Track active category filters (system off by default, matching dashboard)
+  const catFilter = { audit_finding: true, document_gap: true, system: false, uncategorized: true };
+
   let h = '<div class="space-y-6 animate-in" style="text-align:left">';
+
+  // Category summary cards
+  h += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px">';
+  ["audit_finding", "document_gap", "system"].forEach(cat => {
+    const cfg = CATEGORY_CONFIG[cat];
+    const count = catCounts[cat] || 0;
+    const active = catFilter[cat];
+    h += '<button class="cat-filter-btn" data-cat="' + cat + '" style="padding:16px;border-radius:16px;border:2px solid;text-align:left;cursor:pointer;transition:all .2s;' + cfg.bgColor + (active ? '' : ';opacity:0.5;background:#fff;border-color:#f1f5f9') + '">';
+    h += '<div style="display:flex;align-items:center;justify-content:space-between">';
+    h += '<div style="display:flex;align-items:center;gap:8px">';
+    h += '<span style="color:' + cfg.color + '">' + icon(CAT_ICONS[cat], 16) + '</span>';
+    h += '<span style="font-size:14px;font-weight:900;color:' + cfg.color + '">' + cfg.label + '</span>';
+    h += '</div>';
+    h += '<span style="font-size:18px;font-weight:900;color:' + cfg.color + '">' + count + '</span>';
+    h += '</div>';
+    h += '<p style="font-size:10px;color:#94a3b8;margin-top:4px">' + cfg.description + '</p>';
+    h += '</button>';
+  });
+  h += '</div>';
 
   // Filter toolbar
   h += '<div class="filter-toolbar">';
-  h += '<span style="font-size:10px;font-weight:900;color:#94a3b8;text-transform:uppercase;letter-spacing:0.1em">Filters:</span>';
+  h += '<span style="font-size:10px;font-weight:900;color:#94a3b8;text-transform:uppercase;letter-spacing:0.1em">Status:</span>';
   h += '<div style="display:flex;gap:12px">';
   h += '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;background:#fff;padding:4px 12px;border-radius:8px;box-shadow:0 1px 2px rgba(0,0,0,.05);border:1px solid #e2e8f0"><input type="checkbox" checked data-filter="pending" class="note-filter" style="accent-color:#ef4444"><span style="font-size:12px;font-weight:900;color:#475569;text-transform:uppercase">Pending</span></label>';
   h += '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;background:#fff;padding:4px 12px;border-radius:8px;box-shadow:0 1px 2px rgba(0,0,0,.05);border:1px solid #e2e8f0"><input type="checkbox" checked data-filter="reviewed" class="note-filter" style="accent-color:#f97316"><span style="font-size:12px;font-weight:900;color:#475569;text-transform:uppercase">Reviewed</span></label>';
@@ -1117,53 +1300,79 @@ function renderTimelineSVG() {
     const filtered = DATA.reviewNotes.filter(n => {
       const isResolved = n.is_reviewed && !!n.narrative;
       const isReviewedOnly = n.is_reviewed && !n.narrative;
-      if (showPending && !n.is_reviewed) return true;
-      if (showReviewed && isReviewedOnly) return true;
-      if (showResolved && isResolved) return true;
-      return false;
+      const statusPass =
+        (showPending && !n.is_reviewed) ||
+        (showReviewed && isReviewedOnly) ||
+        (showResolved && isResolved);
+      if (!statusPass) return false;
+
+      // Category filter
+      const cat = n.category || "uncategorized";
+      if (!catFilter[cat]) return false;
+      return true;
     });
 
     document.getElementById("notes-count").textContent = filtered.length + " of " + DATA.reviewNotes.length + " notes";
 
-    const list = document.getElementById("notes-list");
-    let html = '<div style="display:grid;grid-template-columns:1fr;gap:16px">';
-
+    // Group by category
+    const groups = {};
     for (const n of filtered) {
-      const isResolved = n.is_reviewed && !!n.narrative;
-      const noteClass = n.is_reviewed ? (isResolved ? "note-resolved" : "note-reviewed") : "note-pending";
-      const statusLabel = n.is_reviewed ? (isResolved ? "RESOLVED" : "REVIEWED") : "PENDING";
-      const statusCls = n.is_reviewed ? (isResolved ? "status-resolved" : "status-reviewed") : "status-pending";
-      const iconColor = n.is_reviewed ? "#22c55e" : "#ef4444";
-
-      html += '<div class="card ' + noteClass + '" style="border-radius:16px;padding:24px">';
-      html += '<div style="display:flex;align-items:flex-start;gap:16px">';
-      html += '<span style="color:' + iconColor + ';flex-shrink:0;margin-top:2px">' + icon("alertTriangle", 20) + '</span>';
-      html += '<div style="flex:1;min-width:0">';
-
-      // Meta line
-      html += '<div style="display:flex;gap:8px;margin-bottom:4px;text-transform:uppercase;font-size:10px;font-weight:900;letter-spacing:0.1em;color:#94a3b8;flex-wrap:wrap;align-items:center">';
-      html += '<span>' + esc(n.type) + '</span>';
-      html += '<span class="badge ' + sevClass(n.severity) + '" style="padding:2px 8px;border-radius:4px">' + esc(n.severity) + '</span>';
-      html += '<span class="badge ' + statusCls + '" style="padding:2px 8px;border-radius:4px;box-shadow:0 1px 2px rgba(0,0,0,.05)">' + statusLabel + '</span>';
-      if (n.contract_id) html += '<span style="color:#3b82f6">Contract ' + esc(n.contract_id) + '</span>';
-      html += '</div>';
-
-      // Issue title
-      html += '<h4 style="color:#334155;font-weight:900;font-size:16px;margin-top:4px">' + esc(n.issue) + '</h4>';
-
-      // Resolution
-      if (n.narrative) {
-        html += '<div style="margin-top:12px">';
-        html += '<label style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:0.1em;color:#94a3b8;display:flex;align-items:center;gap:8px">' + icon("messageSquare", 12) + ' Resolution</label>';
-        html += '<p style="padding:12px;background:#fff;border:1px solid #e2e8f0;border-radius:12px;font-style:italic;font-weight:500;color:#475569;font-size:14px;margin-top:4px">' + esc(n.narrative) + '</p>';
-        html += '</div>';
-      }
-
-      html += '</div></div></div>';
+      const cat = n.category || "uncategorized";
+      if (!groups[cat]) groups[cat] = [];
+      groups[cat].push(n);
     }
 
+    const list = document.getElementById("notes-list");
+    let html = '';
+
+    CAT_ORDER.filter(cat => groups[cat] && groups[cat].length).forEach(cat => {
+      const cfg = CATEGORY_CONFIG[cat] || CATEGORY_CONFIG.uncategorized;
+      html += '<div style="margin-top:16px">';
+      html += '<div style="display:flex;align-items:center;gap:8px;padding-top:8px">';
+      html += '<span style="color:' + cfg.color + '">' + icon(CAT_ICONS[cat] || "alertTriangle", 14) + '</span>';
+      html += '<span style="font-size:12px;font-weight:900;text-transform:uppercase;letter-spacing:0.1em;color:' + cfg.color + '">' + cfg.label + '</span>';
+      html += '<span style="font-size:10px;color:#94a3b8;font-weight:700">(' + groups[cat].length + ')</span>';
+      html += '<div style="flex:1;height:1px;background:#e2e8f0;margin-left:8px"></div>';
+      html += '</div>';
+
+      html += '<div style="display:grid;grid-template-columns:1fr;gap:12px;margin-top:12px">';
+      for (const n of groups[cat]) {
+        const isResolved = n.is_reviewed && !!n.narrative;
+        const noteClass = n.is_reviewed ? (isResolved ? "note-resolved" : "note-reviewed") : "note-pending";
+        const statusLabel = n.is_reviewed ? (isResolved ? "RESOLVED" : "REVIEWED") : "PENDING";
+        const statusCls = n.is_reviewed ? (isResolved ? "status-resolved" : "status-reviewed") : "status-pending";
+        const iconColor = n.is_reviewed ? "#22c55e" : "#ef4444";
+
+        html += '<div class="card ' + noteClass + '" style="border-radius:16px;padding:24px">';
+        html += '<div style="display:flex;align-items:flex-start;gap:16px">';
+        html += '<span style="color:' + iconColor + ';flex-shrink:0;margin-top:2px">' + icon("alertTriangle", 20) + '</span>';
+        html += '<div style="flex:1;min-width:0">';
+
+        // Meta line
+        html += '<div style="display:flex;gap:8px;margin-bottom:4px;text-transform:uppercase;font-size:10px;font-weight:900;letter-spacing:0.1em;color:#94a3b8;flex-wrap:wrap;align-items:center">';
+        html += '<span>' + esc(n.type) + '</span>';
+        html += '<span class="badge ' + sevClass(n.severity) + '" style="padding:2px 8px;border-radius:4px">' + esc(n.severity) + '</span>';
+        html += '<span class="badge ' + statusCls + '" style="padding:2px 8px;border-radius:4px;box-shadow:0 1px 2px rgba(0,0,0,.05)">' + statusLabel + '</span>';
+        if (n.contract_id) html += '<span style="color:#3b82f6">Contract ' + esc(n.contract_id) + (contractFileName(n.contract_id) ? ' <span style="color:#94a3b8;font-size:9px">(' + esc(contractFileName(n.contract_id)) + ')</span>' : '') + '</span>';
+        html += '</div>';
+
+        // Issue title
+        html += '<h4 style="color:#334155;font-weight:900;font-size:16px;margin-top:4px">' + esc(n.issue) + '</h4>';
+
+        // Resolution
+        if (n.narrative) {
+          html += '<div style="margin-top:12px">';
+          html += '<label style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:0.1em;color:#94a3b8;display:flex;align-items:center;gap:8px">' + icon("messageSquare", 12) + ' Resolution</label>';
+          html += '<p style="padding:12px;background:#fff;border:1px solid #e2e8f0;border-radius:12px;font-style:italic;font-weight:500;color:#475569;font-size:14px;margin-top:4px">' + esc(n.narrative) + '</p>';
+          html += '</div>';
+        }
+
+        html += '</div></div></div>';
+      }
+      html += '</div></div>';
+    });
+
     if (!filtered.length) html += '<div style="text-align:center;color:#94a3b8;font-style:italic;padding:48px">No review notes matching filters</div>';
-    html += '</div>';
     list.innerHTML = html;
   }
 
@@ -1171,6 +1380,87 @@ function renderTimelineSVG() {
   document.querySelectorAll(".note-filter").forEach(cb => {
     cb.addEventListener("change", renderNoteCards);
   });
+
+  // Category filter toggle
+  document.querySelectorAll(".cat-filter-btn").forEach(btn => {
+    btn.addEventListener("click", function() {
+      const cat = this.dataset.cat;
+      catFilter[cat] = !catFilter[cat];
+      this.style.opacity = catFilter[cat] ? "1" : "0.5";
+      if (catFilter[cat]) {
+        const cfg = CATEGORY_CONFIG[cat];
+        this.style.cssText = "padding:16px;border-radius:16px;border:2px solid;text-align:left;cursor:pointer;transition:all .2s;" + cfg.bgColor;
+      } else {
+        this.style.cssText = "padding:16px;border-radius:16px;border:2px solid;text-align:left;cursor:pointer;transition:all .2s;opacity:0.5;background:#fff;border-color:#f1f5f9";
+      }
+      renderNoteCards();
+    });
+  });
+})();
+
+// ── Zoom/Pan for SVG containers ─────────────────────────────────────────────
+(function initZoomPan() {
+  document.querySelectorAll(".zoom-controls").forEach(function(ctrl) {
+    var targetId = ctrl.getAttribute("data-target");
+    var wrap = document.getElementById(targetId);
+    if (!wrap) return;
+    var svg = wrap.querySelector("svg");
+    if (!svg) return;
+
+    var zoom = 1, panX = 0, panY = 0, isPanning = false, startX = 0, startY = 0;
+    var origW = svg.style.width ? parseFloat(svg.style.width) : svg.getBoundingClientRect().width;
+    var origH = svg.style.height ? parseFloat(svg.style.height) : svg.getBoundingClientRect().height;
+
+    // Build controls
+    ctrl.innerHTML = '<button class="zoom-btn" data-action="out">−</button>' +
+      '<button class="zoom-pct" data-action="reset">100%</button>' +
+      '<button class="zoom-btn" data-action="in">+</button>';
+    var pctBtn = ctrl.querySelector("[data-action=reset]");
+
+    function applyTransform() {
+      svg.style.transform = "translate(" + panX + "px," + panY + "px) scale(" + zoom + ")";
+      pctBtn.textContent = Math.round(zoom * 100) + "%";
+    }
+
+    ctrl.addEventListener("click", function(e) {
+      var action = e.target.getAttribute("data-action") || e.target.parentElement.getAttribute("data-action");
+      if (action === "in") zoom = Math.min(3, zoom + 0.2);
+      else if (action === "out") zoom = Math.max(0.3, zoom - 0.2);
+      else if (action === "reset") { zoom = 1; panX = 0; panY = 0; }
+      applyTransform();
+    });
+
+    wrap.addEventListener("wheel", function(e) {
+      e.preventDefault();
+      zoom = Math.min(3, Math.max(0.3, zoom + (e.deltaY > 0 ? -0.1 : 0.1)));
+      applyTransform();
+    }, { passive: false });
+
+    wrap.addEventListener("mousedown", function(e) {
+      if (e.target.closest(".zoom-controls")) return;
+      isPanning = true;
+      startX = e.clientX - panX;
+      startY = e.clientY - panY;
+      wrap.style.cursor = "grabbing";
+    });
+
+    window.addEventListener("mousemove", function(e) {
+      if (!isPanning) return;
+      panX = e.clientX - startX;
+      panY = e.clientY - startY;
+      svg.style.transition = "none";
+      applyTransform();
+    });
+
+    window.addEventListener("mouseup", function() {
+      if (isPanning) {
+        isPanning = false;
+        wrap.style.cursor = "grab";
+        svg.style.transition = "transform 0.1s";
+      }
+    });
+  });
+
 })();
 
 // ── Footer date ─────────────────────────────────────────────────────────────

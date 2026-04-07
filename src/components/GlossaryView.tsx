@@ -2,11 +2,17 @@
 
 import { useEffect, useState } from "react";
 import { Search, Plus, Book } from "lucide-react";
-import type { Definition } from "@/types";
+import type { Contract, Definition } from "@/types";
 
 export default function GlossaryView({ projectId }: { projectId?: number | null }) {
   const [definitions, setDefinitions] = useState<Definition[]>([]);
+  const [contracts, setContracts] = useState<Contract[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
+
+  useEffect(() => {
+    const qs = projectId ? `?project_id=${projectId}` : "";
+    fetch(`/api/contracts${qs}`).then(r => r.json()).then(d => setContracts(d.contracts));
+  }, [projectId]);
 
   useEffect(() => {
     const params = new URLSearchParams();
@@ -15,6 +21,11 @@ export default function GlossaryView({ projectId }: { projectId?: number | null 
     const qs = params.toString() ? `?${params}` : "";
     fetch(`/api/glossary${qs}`).then(r => r.json()).then(d => setDefinitions(d.definitions));
   }, [searchTerm, projectId]);
+
+  const contractFileName = (id: string) => {
+    const c = contracts.find(x => x.id === id);
+    return c?.file_path ? c.file_path.split(/[/\\]/).pop() : null;
+  };
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500 text-left">
@@ -43,8 +54,12 @@ export default function GlossaryView({ projectId }: { projectId?: number | null 
           <div key={item.id} className="bg-white border-2 rounded-2xl p-6 shadow-sm group hover:border-blue-300 transition-colors border-transparent">
             <h3 className="text-lg font-black text-slate-900 group-hover:text-blue-600 transition-colors tracking-tight">{item.term}</h3>
             <p className="text-sm text-slate-600 leading-relaxed bg-slate-50 p-4 rounded-xl border border-slate-100 font-medium italic mt-2 shadow-inner">{item.definition}</p>
-            <div className="flex justify-end mt-4 text-[10px] font-black text-slate-400 uppercase tracking-widest">
-              {item.contract_id} {item.section}
+            <div className="flex justify-end mt-4 text-[10px] font-black text-slate-400 uppercase tracking-widest gap-2">
+              <span>{item.contract_id}</span>
+              {contractFileName(item.contract_id) && (
+                <span className="normal-case font-mono text-slate-300">{contractFileName(item.contract_id)}</span>
+              )}
+              <span>{item.section}</span>
             </div>
           </div>
         ))}

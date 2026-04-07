@@ -4,9 +4,10 @@ import { useEffect, useState, useCallback } from "react";
 import {
   CheckCircle2, Scale,
   Briefcase, Bell,
-  Pencil, Link, Save, Edit3,
+  Pencil, Link, Save, Edit3, ExternalLink,
 } from "lucide-react";
 import type { Contract, Clause, ReviewNote } from "@/types";
+import ContractDetail from "@/components/ContractDetail";
 
 interface Project {
   id: number;
@@ -25,6 +26,18 @@ const formatDate = (d: string | null) => {
   return `${date.getDate().toString().padStart(2, "0")}-${months[date.getMonth()]}-${date.getFullYear()}`;
 };
 
+/** Show contract ID + short filename for traceability */
+function contractLabel(contractId: string, contracts: Contract[]): JSX.Element {
+  const c = contracts.find(x => x.id === contractId);
+  const fileName = c?.file_path ? c.file_path.split(/[/\\]/).pop() : null;
+  return (
+    <div>
+      <div className="font-bold">{contractId}</div>
+      {fileName && <div className="text-[9px] text-slate-400 font-mono truncate max-w-[160px]">{fileName}</div>}
+    </div>
+  );
+}
+
 export default function AuditOverview({ projectId }: { projectId?: number | null }) {
   const [contracts, setContracts] = useState<Contract[]>([]);
   const [auditClauses, setAuditClauses] = useState<Clause[]>([]);
@@ -32,6 +45,7 @@ export default function AuditOverview({ projectId }: { projectId?: number | null
   const [interestClauses, setInterestClauses] = useState<Clause[]>([]);
   const [notes, setNotes] = useState<ReviewNote[]>([]);
   const [project, setProject] = useState<Project | null>(null);
+  const [selectedContractId, setSelectedContractId] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editForm, setEditForm] = useState({
     name: "", licensor: "", licensee: "",
@@ -236,15 +250,21 @@ export default function AuditOverview({ projectId }: { projectId?: number | null
           <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
             <h3 className="font-bold text-slate-800 flex items-center gap-2 border-b pb-4"><Bell size={18} className="text-amber-500" /> Contracts in Scope</h3>
             <div className="space-y-3">
-              {contracts.map(contract => (
-                <div key={contract.id} className="flex items-center justify-between p-3 rounded-xl border bg-green-50 border-green-100">
-                  <div className="flex items-center gap-3 overflow-hidden text-left">
-                    <CheckCircle2 size={14} className="text-green-500 shrink-0" />
-                    <div className="truncate text-xs font-bold text-slate-700">{contract.id}: {contract.name}</div>
+              {contracts.map(contract => {
+                const fileName = contract.file_path ? contract.file_path.split(/[/\\]/).pop() : null;
+                return (
+                  <div key={contract.id} className="flex items-center justify-between p-3 rounded-xl border bg-green-50 border-green-100 cursor-pointer hover:bg-green-100 transition-colors" onClick={() => setSelectedContractId(contract.id)}>
+                    <div className="flex items-center gap-3 overflow-hidden text-left">
+                      <CheckCircle2 size={14} className="text-green-500 shrink-0" />
+                      <div className="min-w-0">
+                        <div className="truncate text-xs font-bold text-slate-700">{contract.id}: {contract.name}</div>
+                        {fileName && <div className="truncate text-[10px] text-slate-400 font-mono mt-0.5">{fileName}</div>}
+                      </div>
+                    </div>
+                    <span className="text-[8px] px-2 py-0.5 rounded font-black uppercase bg-green-500 text-white shrink-0">{contract.type}</span>
                   </div>
-                  <span className="text-[8px] px-2 py-0.5 rounded font-black uppercase bg-green-500 text-white">{contract.type}</span>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
 
@@ -297,7 +317,7 @@ export default function AuditOverview({ projectId }: { projectId?: number | null
                   const terms = parseKeyTerms(clause.key_terms_json);
                   return (
                     <tr key={clause.id} className="hover:bg-slate-50">
-                      <td className="px-6 py-4 font-bold">{clause.contract_id}</td>
+                      <td className="px-6 py-4">{contractLabel(clause.contract_id, contracts)}</td>
                       <td className="px-6 py-4 font-mono text-slate-500">{clause.section}</td>
                       <td className="px-6 py-4 text-slate-500">
                         {terms.notice_period_days && <span className="mr-3">{terms.notice_period_days}d notice</span>}
@@ -328,9 +348,9 @@ export default function AuditOverview({ projectId }: { projectId?: number | null
                     const terms = parseKeyTerms(c.key_terms_json);
                     return (
                       <tr key={c.id}>
-                        <td className="px-4 py-3 font-bold text-slate-700">{c.contract_id}</td>
+                        <td className="px-4 py-3">{contractLabel(c.contract_id, contracts)}</td>
                         <td className="px-4 py-3 text-slate-500">{terms.retention_years ? `${terms.retention_years} Years` : c.section}</td>
-                        <td className="px-4 py-3 text-right"><button className="text-slate-400 hover:text-blue-600"><Link size={14}/></button></td>
+                        <td className="px-4 py-3 text-right"><button onClick={() => setSelectedContractId(c.contract_id)} className="text-slate-400 hover:text-blue-600"><ExternalLink size={14}/></button></td>
                       </tr>
                     );
                   })}
@@ -350,9 +370,9 @@ export default function AuditOverview({ projectId }: { projectId?: number | null
                     const terms = parseKeyTerms(c.key_terms_json);
                     return (
                       <tr key={c.id}>
-                        <td className="px-4 py-3 font-bold text-slate-700">{c.contract_id}</td>
+                        <td className="px-4 py-3">{contractLabel(c.contract_id, contracts)}</td>
                         <td className="px-4 py-3 text-slate-500">{terms.rate || terms.interest_rate || c.section}</td>
-                        <td className="px-4 py-3 text-right"><button className="text-slate-400 hover:text-blue-600"><Link size={14}/></button></td>
+                        <td className="px-4 py-3 text-right"><button onClick={() => setSelectedContractId(c.contract_id)} className="text-slate-400 hover:text-blue-600"><ExternalLink size={14}/></button></td>
                       </tr>
                     );
                   })}
@@ -365,6 +385,11 @@ export default function AuditOverview({ projectId }: { projectId?: number | null
           </div>
         </div>
       </div>
+
+      {/* Contract Detail Modal */}
+      {selectedContractId && (
+        <ContractDetail contractId={selectedContractId} onClose={() => setSelectedContractId(null)} />
+      )}
     </div>
   );
 }

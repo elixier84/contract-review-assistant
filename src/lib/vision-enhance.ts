@@ -1,4 +1,4 @@
-import { execSync } from "child_process";
+import { execSync, exec } from "child_process";
 import fs from "fs";
 import path from "path";
 
@@ -59,48 +59,40 @@ export async function analyzePages(filePath: string): Promise<PageAnalysis[]> {
 const TABLE_KEYWORDS = /schedule|appendix|table|royalt|pricing|fee|rate|tariff/i;
 const NUMBER_PATTERN = /\$[\d,.]+|[\d,]+\s*[-–—]\s*[\d,]+/g;
 
+/**
+ * Identify pages that need Vision OCR.
+ * Any page with fewer than 100 characters of parser-extracted text
+ * is considered empty/scanned and needs OCR. No page cap — contract
+ * completeness is non-negotiable for compliance audits.
+ */
 export function identifySuspectPages(
   pageAnalysis: PageAnalysis[],
-  maxPages = 15,
 ): number[] {
   if (pageAnalysis.length === 0) return [];
 
-  const avgLen =
-    pageAnalysis.reduce((s, p) => s + p.textLength, 0) / pageAnalysis.length;
+  const EMPTY_THRESHOLD = 100; // chars — below this, page is unreadable
   const suspects = new Set<number>();
 
   for (const p of pageAnalysis) {
-    // Trigger 1: Low density — less than 50% of average
-    if (p.textLength < avgLen * 0.5 && p.textLength < 200) {
+    // Primary trigger: page has insufficient text (scanned image, blank, etc.)
+    if (p.textLength < EMPTY_THRESHOLD) {
       suspects.add(p.page);
       continue;
     }
 
-    // Trigger 2: Table keyword present but numbers missing
+    // Secondary trigger: table keyword present but numbers missing
+    // (indicates a pricing/schedule table rendered as image)
     if (TABLE_KEYWORDS.test(p.text)) {
       const numberMatches = p.text.match(NUMBER_PATTERN);
       const numberCount = numberMatches?.length ?? 0;
-      // If keyword found but fewer than 3 number patterns, suspect
       if (numberCount < 3) {
         suspects.add(p.page);
       }
     }
   }
 
-  // Also check: if a page has table keyword, check the NEXT page too
-  // (table might span across pages)
-  for (const p of pageAnalysis) {
-    if (TABLE_KEYWORDS.test(p.text) && suspects.has(p.page)) {
-      const nextPage = p.page + 1;
-      if (nextPage <= pageAnalysis.length) {
-        suspects.add(nextPage);
-      }
-    }
-  }
-
-  // Cap at maxPages to avoid excessive Vision calls
   const sorted = [...suspects].sort((a, b) => a - b);
-  return sorted.slice(0, maxPages);
+  return sorted;
 }
 
 // ---------------------------------------------------------------------------
@@ -124,16 +116,16 @@ export function convertPagesToImages(
         { timeout: 30_000, stdio: "ignore" },
       );
 
-      // pdftoppm outputs as prefix-{pageNum}.png
-      const expectedFile = `${prefix}-${pageNum}.png`;
-      // Or sometimes just prefix.png for single page
-      const altFile = `${prefix}.png`;
+      // pdftoppm outputs with zero-padded page numbers: p2-02.png, p10-10.png
+      // Try multiple patterns to find the output file
+      const padded = String(pageNum).padStart(2, "0");
+      const candidates = [
+        `${prefix}-${padded}.png`,     // p2-02.png (common for single-digit pages)
+        `${prefix}-${pageNum}.png`,    // p10-10.png (common for 2+ digit pages)
+        `${prefix}.png`,               // p2.png (single page fallback)
+      ];
 
-      const outputFile = fs.existsSync(expectedFile)
-        ? expectedFile
-        : fs.existsSync(altFile)
-          ? altFile
-          : null;
+      const outputFile = candidates.find((f) => fs.existsSync(f)) ?? null;
 
       if (outputFile) {
         results.push({ page: pageNum, imagePath: outputFile });
@@ -201,6 +193,61 @@ export function extractWithVision(
 }
 
 // ---------------------------------------------------------------------------
+// Step 5b: Extract text from images via Claude Vision — PARALLEL
+// ---------------------------------------------------------------------------
+
+function visionExtractOne(page: number, imagePath: string): Promise<{ page: number; text: string } | null> {
+  return new Promise((resolve) => {
+    const tmpDir = path.join(process.cwd(), "tools", "tmp_vision");
+    const promptFile = path.join(tmpDir, `prompt_p${page}.txt`);
+    const absImagePath = path.resolve(imagePath).replace(/\\/g, "/");
+    const prompt = [
+      `Read the file at ${absImagePath}.`,
+      `Extract ALL text content from this document page image.`,
+      `For tables, format them as plain text with columns separated by " | ".`,
+      `Preserve all numbers, currency symbols, and formatting exactly.`,
+      `Output ONLY the extracted text, no commentary.`,
+    ].join(" ");
+    fs.writeFileSync(promptFile, prompt, "utf-8");
+
+    const cwd = process.cwd().replace(/\\/g, "/");
+    const cmd = `claude --print --model sonnet --add-dir "${cwd}" --allowedTools "Read" < "${promptFile}"`;
+
+    exec(cmd, { encoding: "utf-8", maxBuffer: 5 * 1024 * 1024, timeout: 120_000, shell: "bash" }, (err, stdout) => {
+      try { fs.unlinkSync(promptFile); } catch { /* ignore */ }
+      if (err || !stdout || stdout.trim().length <= 20) {
+        console.warn(`[Vision‖] Page ${page}: failed`);
+        resolve(null);
+        return;
+      }
+      const text = stdout.trim();
+      console.log(`[Vision‖] Page ${page}: extracted ${text.length} chars`);
+      resolve({ page, text });
+    });
+  });
+}
+
+export async function extractWithVisionParallel(
+  pageImages: { page: number; imagePath: string }[],
+  concurrency = 4,
+): Promise<{ page: number; text: string }[]> {
+  const results: { page: number; text: string }[] = [];
+  const queue = [...pageImages];
+
+  while (queue.length > 0) {
+    const batch = queue.splice(0, concurrency);
+    const batchResults = await Promise.all(
+      batch.map(({ page, imagePath }) => visionExtractOne(page, imagePath)),
+    );
+    for (const r of batchResults) {
+      if (r) results.push(r);
+    }
+  }
+
+  return results.sort((a, b) => a.page - b.page);
+}
+
+// ---------------------------------------------------------------------------
 // Step 6: Merge base text with Vision-enhanced text
 // ---------------------------------------------------------------------------
 
@@ -260,28 +307,50 @@ export function cleanupVisionTemp(): void {
 // Main orchestrator: enhance PDF text extraction with Vision
 // ---------------------------------------------------------------------------
 
+export interface EnhanceResult {
+  text: string;
+  visionPages: number[];
+  pageAnalysis: PageAnalysis[];
+  visionTexts: { page: number; text: string }[];
+  totalPages: number;
+  parserPages: number;
+  coverage: number; // 0-100
+}
+
 export async function enhancePdfWithVision(
   filePath: string,
   baseText: string,
-): Promise<{ text: string; visionPages: number[] }> {
+): Promise<EnhanceResult> {
+  const emptyResult = (pageAnalysis: PageAnalysis[]): EnhanceResult => ({
+    text: baseText,
+    visionPages: [],
+    pageAnalysis,
+    visionTexts: [],
+    totalPages: pageAnalysis.length,
+    parserPages: pageAnalysis.filter((p) => p.textLength >= 100).length,
+    coverage: pageAnalysis.length > 0
+      ? Math.round((pageAnalysis.filter((p) => p.textLength >= 100).length / pageAnalysis.length) * 100)
+      : 0,
+  });
+
   try {
     // Step 2: Analyze pages
     const pageAnalysis = await analyzePages(filePath);
 
-    // Step 3: Identify suspect pages
+    // Step 3: Identify pages needing OCR (no page cap)
     const suspectPages = identifySuspectPages(pageAnalysis);
 
     if (suspectPages.length === 0) {
-      return { text: baseText, visionPages: [] };
+      return { ...emptyResult(pageAnalysis), coverage: 100 };
     }
 
-    console.log(`[Vision] ${path.basename(filePath)}: ${suspectPages.length} suspect pages detected: [${suspectPages.join(", ")}]`);
+    console.log(`[Vision] ${path.basename(filePath)}: ${suspectPages.length}/${pageAnalysis.length} pages need OCR: [${suspectPages.join(", ")}]`);
 
     // Step 4: Convert to images
     const pageImages = convertPagesToImages(filePath, suspectPages);
 
     if (pageImages.length === 0) {
-      return { text: baseText, visionPages: [] };
+      return emptyResult(pageAnalysis);
     }
 
     // Step 5: Extract with Vision
@@ -293,12 +362,26 @@ export async function enhancePdfWithVision(
     // Cleanup temp images
     cleanupVisionTemp();
 
+    // Calculate final coverage
+    const visionPageSet = new Set(visionTexts.map((v) => v.page));
+    const readablePages = pageAnalysis.filter(
+      (p) => p.textLength >= 100 || visionPageSet.has(p.page),
+    ).length;
+    const coverage = pageAnalysis.length > 0
+      ? Math.round((readablePages / pageAnalysis.length) * 100)
+      : 0;
+
     return {
       text: mergedText,
       visionPages: visionTexts.map((v) => v.page),
+      pageAnalysis,
+      visionTexts,
+      totalPages: pageAnalysis.length,
+      parserPages: pageAnalysis.filter((p) => p.textLength >= 100).length,
+      coverage,
     };
   } catch (err) {
     console.warn(`[Vision] Enhancement failed for ${filePath}:`, err instanceof Error ? err.message : err);
-    return { text: baseText, visionPages: [] };
+    return emptyResult([]);
   }
 }

@@ -194,6 +194,14 @@ export default function RelationshipDiagram({ projectId }: { projectId?: number 
   const [relationships, setRelationships] = useState<Relationship[]>([]);
   const [hoveredEdge, setHoveredEdge] = useState<string | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const [panStart, setPanStart] = useState({ x: 0, y: 0 });
+  const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>({});
+  const [draggingNode, setDraggingNode] = useState<string | null>(null);
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
 
   useEffect(() => {
     const qs = projectId ? `?project_id=${projectId}` : "";
@@ -219,32 +227,108 @@ export default function RelationshipDiagram({ projectId }: { projectId?: number 
 
   if (!contracts.length) return null;
 
-  const nodes = layoutNodes(contracts, relationships);
+  const baseNodes = layoutNodes(contracts, relationships);
   const edges = deduplicateEdges(relationships);
-  const maxX = nodes.reduce((m, n) => Math.max(m, n.x + n.w), 0) + 40;
-  const maxY = nodes.reduce((m, n) => Math.max(m, n.y + n.h), 0) + 40;
-  const svgW = Math.max(800, maxX);
-  const svgH = Math.max(460, maxY);
+
+  // Apply user drag offsets
+  const nodes = baseNodes.map(n => {
+    const pos = nodePositions[n.id];
+    return pos ? { ...n, x: pos.x, y: pos.y } : n;
+  });
+
+  const maxX = nodes.reduce((m, n) => Math.max(m, n.x + n.w), 0) + 100;
+  const maxY = nodes.reduce((m, n) => Math.max(m, n.y + n.h), 0) + 100;
+  const svgW = Math.max(1200, maxX);
+  const svgH = Math.max(600, maxY);
+
+  const handleWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -0.1 : 0.1;
+    setZoom(z => Math.min(3, Math.max(0.3, z + delta)));
+  };
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (e.button === 0 && !draggingNode) {
+      setIsPanning(true);
+      setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+    }
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (draggingNode) {
+      const svgEl = svgRef.current;
+      if (!svgEl) return;
+      const rect = svgEl.getBoundingClientRect();
+      const x = (e.clientX - rect.left) / zoom - dragOffset.x;
+      const y = (e.clientY - rect.top) / zoom - dragOffset.y;
+      setNodePositions(prev => ({ ...prev, [draggingNode]: { x, y } }));
+    } else if (isPanning) {
+      setPan({ x: e.clientX - panStart.x, y: e.clientY - panStart.y });
+    }
+  };
+
+  const handleMouseUp = () => {
+    setIsPanning(false);
+    setDraggingNode(null);
+  };
+
+  const handleNodeMouseDown = (e: React.MouseEvent, nodeId: string) => {
+    e.stopPropagation();
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node) return;
+    const svgEl = svgRef.current;
+    if (!svgEl) return;
+    const rect = svgEl.getBoundingClientRect();
+    const mouseX = (e.clientX - rect.left) / zoom;
+    const mouseY = (e.clientY - rect.top) / zoom;
+    setDragOffset({ x: mouseX - node.x, y: mouseY - node.y });
+    setDraggingNode(nodeId);
+  };
+
+  const resetView = () => { setZoom(1); setPan({ x: 0, y: 0 }); setNodePositions({}); };
+  const zoomIn = () => setZoom(z => Math.min(3, z + 0.2));
+  const zoomOut = () => setZoom(z => Math.max(0.3, z - 0.2));
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm">
       <div className="p-5 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
         <h3 className="font-bold text-slate-800 text-sm">Contract Relationship Map</h3>
-        <div className="flex gap-4 text-[10px] font-bold text-slate-400">
-          {Object.entries(EDGE_LABELS).map(([type, label]) => (
-            <div key={type} className="flex items-center gap-1.5">
-              <div className="w-3 h-0.5 rounded" style={{ background: EDGE_COLORS[type] }} />
-              {label}
-            </div>
-          ))}
+        <div className="flex items-center gap-4">
+          <div className="flex gap-4 text-[10px] font-bold text-slate-400">
+            {Object.entries(EDGE_LABELS).map(([type, label]) => (
+              <div key={type} className="flex items-center gap-1.5">
+                <div className="w-3 h-0.5 rounded" style={{ background: EDGE_COLORS[type] }} />
+                {label}
+              </div>
+            ))}
+          </div>
+          <div className="flex items-center gap-1 ml-4 border-l border-slate-200 pl-4">
+            <button onClick={zoomOut} className="w-7 h-7 flex items-center justify-center rounded-lg bg-white border border-slate-200 text-slate-500 hover:bg-slate-100 text-sm font-bold">−</button>
+            <button onClick={resetView} className="px-2 h-7 flex items-center justify-center rounded-lg bg-white border border-slate-200 text-slate-400 hover:bg-slate-100 text-[10px] font-bold min-w-[44px]">{Math.round(zoom * 100)}%</button>
+            <button onClick={zoomIn} className="w-7 h-7 flex items-center justify-center rounded-lg bg-white border border-slate-200 text-slate-500 hover:bg-slate-100 text-sm font-bold">+</button>
+          </div>
         </div>
       </div>
 
-      <div className="overflow-auto" style={{ maxHeight: 700 }}>
+      <div
+        ref={containerRef}
+        className="overflow-hidden"
+        style={{ maxHeight: 700, cursor: draggingNode ? "grabbing" : isPanning ? "grabbing" : "grab" }}
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+      >
       <svg
         ref={svgRef}
         viewBox={`0 0 ${svgW} ${svgH}`}
-        style={{ width: svgW, height: svgH, minWidth: "100%" }}
+        style={{
+          width: svgW * zoom,
+          height: svgH * zoom,
+          transform: `translate(${pan.x}px, ${pan.y}px)`,
+          transition: isPanning || draggingNode ? "none" : "transform 0.1s",
+        }}
       >
         <defs>
           {Object.entries(EDGE_COLORS).map(([type, color]) => (
@@ -326,8 +410,14 @@ export default function RelationshipDiagram({ projectId }: { projectId?: number 
         {/* Nodes */}
         {nodes.map((node) => {
           const color = TYPE_COLORS[node.type] || "#64748b";
+          const isDragging = draggingNode === node.id;
           return (
-            <g key={node.id} filter="url(#node-shadow)">
+            <g
+              key={node.id}
+              filter="url(#node-shadow)"
+              onMouseDown={(e) => handleNodeMouseDown(e, node.id)}
+              style={{ cursor: isDragging ? "grabbing" : "grab" }}
+            >
               <rect
                 x={node.x}
                 y={node.y}

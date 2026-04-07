@@ -127,7 +127,7 @@ export default function PricingView({ projectId }: { projectId?: number | null }
                             <tr key={i} className="hover:bg-slate-50">
                               <td className="px-3 py-2 font-mono">{tier.from?.toLocaleString()}</td>
                               <td className="px-3 py-2 font-mono">{tier.to ? tier.to.toLocaleString() : "+"}</td>
-                              <td className="px-3 py-2 text-right font-bold text-green-700">${tier.rate?.toFixed(2)}</td>
+                              <td className="px-3 py-2 text-right font-bold text-green-700">${tier.rate?.toFixed(4)}</td>
                             </tr>
                           ))}
                         </tbody>

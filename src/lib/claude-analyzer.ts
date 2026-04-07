@@ -126,8 +126,8 @@ function runClaudeCLI(content: string, modelId: string, env: NodeJS.ProcessEnv):
 
     const timer = setTimeout(() => {
       proc.kill();
-      reject(new Error("Claude CLI timeout (5 min)"));
-    }, 300_000);
+      reject(new Error("Claude CLI timeout (7 min)"));
+    }, 420_000);
 
     proc.on("close", (code) => {
       clearTimeout(timer);
@@ -518,37 +518,156 @@ export async function analyzeContract(
   console.log(`\n  Analyzing contract ${contractId}: ${row.name}`);
   onProgress?.({ type: "contract_start", contractId });
 
-  // Pre-analysis: check text quality, run Vision enhancement if needed
+  // Pre-analysis: Vision OCR for pages that parser couldn't read
   const filePath = (db.prepare("SELECT file_path FROM contracts WHERE id = ?").get(contractId) as { file_path: string } | undefined)?.file_path;
   if (filePath && filePath.toLowerCase().endsWith(".pdf")) {
     try {
-      const pdfParse = require("pdf-parse");
-      const pdfFs = require("fs");
-      const pdfBuffer = pdfFs.readFileSync(filePath);
-      const pdfData = await pdfParse(pdfBuffer);
-      const avgCharsPerPage = pdfData.numpages > 0 ? contractText.length / pdfData.numpages : contractText.length;
+      // Check if there are empty pages in contract_pages
+      const emptyCount = (db.prepare(
+        "SELECT COUNT(*) as cnt FROM contract_pages WHERE contract_id = ? AND is_empty = 1"
+      ).get(contractId) as { cnt: number })?.cnt ?? 0;
+      const totalCount = (db.prepare(
+        "SELECT COUNT(*) as cnt FROM contract_pages WHERE contract_id = ?"
+      ).get(contractId) as { cnt: number })?.cnt ?? 0;
 
-      // If average chars per page is low, likely has unreadable image pages
-      if (avgCharsPerPage < 300 && pdfData.numpages > 1) {
-        console.log(`  [Vision] Low text density detected: ${Math.round(avgCharsPerPage)} chars/page (${pdfData.numpages} pages). Running Vision enhancement...`);
-        const { enhancePdfWithVision } = await import("./vision-enhance");
-        const enhanced = await enhancePdfWithVision(filePath, contractText);
+      if (emptyCount > 0 && totalCount > 0) {
+        const coverage = Math.round(((totalCount - emptyCount) / totalCount) * 100);
+        console.log(`  [Vision] Coverage: ${totalCount - emptyCount}/${totalCount} pages (${coverage}%). Running parallel Vision OCR on ${emptyCount} empty pages...`);
 
-        if (enhanced.visionPages.length > 0) {
-          contractText = enhanced.text;
-          // Update raw_text in DB
-          db.prepare("UPDATE contracts SET raw_text = ?, updated_at = datetime('now') WHERE id = ?")
-            .run(contractText, contractId);
-          // Add review note
-          db.prepare(`
-            INSERT INTO review_notes (contract_id, type, category, issue, severity, is_reviewed, narrative, created_at, updated_at)
-            VALUES (?, 'vision_enhanced', 'system', ?, 'medium', 0, '', datetime('now'), datetime('now'))
-          `).run(contractId, `Pages ${enhanced.visionPages.join(", ")} had low text density. Enhanced via Claude Vision OCR. Manual verification recommended.`);
-          console.log(`  [Vision] Enhanced: ${enhanced.visionPages.length} pages, text ${row.raw_text.length} → ${contractText.length} chars`);
+        const { analyzePages, identifySuspectPages, convertPagesToImages, extractWithVisionParallel, cleanupVisionTemp } = await import("./vision-enhance");
+        const pageAnalysis = await analyzePages(filePath);
+        const suspectPages = identifySuspectPages(pageAnalysis);
+
+        if (suspectPages.length > 0) {
+          const pageImages = convertPagesToImages(filePath, suspectPages);
+          const visionTexts = await extractWithVisionParallel(pageImages, 4);
+
+          if (visionTexts.length > 0) {
+            // Save Vision pages to contract_pages
+            const upsertPage = db.prepare(`
+              INSERT INTO contract_pages (contract_id, page_number, source, text, char_count, is_empty, updated_at)
+              VALUES (?, ?, 'vision', ?, ?, 0, datetime('now'))
+              ON CONFLICT(contract_id, page_number) DO UPDATE SET
+                source = 'vision', text = excluded.text, char_count = excluded.char_count,
+                is_empty = 0, updated_at = datetime('now')
+            `);
+            const tx = db.transaction(() => {
+              for (const vt of visionTexts) {
+                upsertPage.run(contractId, vt.page, vt.text, vt.text.length);
+              }
+            });
+            tx();
+
+            // Rebuild raw_text from contract_pages
+            const pages = db.prepare(
+              "SELECT page_number, source, text, char_count FROM contract_pages WHERE contract_id = ? ORDER BY page_number"
+            ).all(contractId) as { page_number: number; source: string; text: string; char_count: number }[];
+
+            let fullText = "";
+            for (const p of pages) {
+              if (p.char_count > 0) {
+                if (p.source === "vision") {
+                  fullText += `\n\n[Page ${p.page_number} — Vision OCR]\n${p.text}\n[/Page ${p.page_number}]\n`;
+                } else {
+                  fullText += `\n\n[Page ${p.page_number}]\n${p.text}\n[/Page ${p.page_number}]\n`;
+                }
+              }
+            }
+            contractText = fullText.trim();
+            db.prepare("UPDATE contracts SET raw_text = ?, updated_at = datetime('now') WHERE id = ?")
+              .run(contractText, contractId);
+
+            // Add review note
+            db.prepare(`
+              INSERT INTO review_notes (contract_id, type, category, issue, severity, is_reviewed, narrative, created_at, updated_at)
+              VALUES (?, 'vision_enhanced', 'system', ?, 'medium', 0, '', datetime('now'), datetime('now'))
+            `).run(contractId, `Pages ${visionTexts.map((v) => v.page).join(", ")} enhanced via Vision OCR (parallel). Manual verification recommended.`);
+
+            const newEmptyCount = pages.filter((p) => p.char_count === 0).length;
+            const newCoverage = Math.round(((pages.length - newEmptyCount) / pages.length) * 100);
+            console.log(`  [Vision] Enhanced: ${visionTexts.length} pages. Coverage: ${newCoverage}%. Text: ${row.raw_text.length} → ${contractText.length} chars`);
+          }
+
+          cleanupVisionTemp();
+        }
+      } else if (totalCount === 0) {
+        // No page data yet — run page analysis and store it
+        console.log(`  [Pages] No page data found. Running page analysis...`);
+        const { analyzePages, identifySuspectPages, convertPagesToImages, extractWithVisionParallel, cleanupVisionTemp } = await import("./vision-enhance");
+        const pageAnalysis = await analyzePages(filePath);
+
+        const upsertPage = db.prepare(`
+          INSERT INTO contract_pages (contract_id, page_number, source, text, char_count, is_empty, updated_at)
+          VALUES (?, ?, 'parser', ?, ?, ?, datetime('now'))
+          ON CONFLICT(contract_id, page_number) DO UPDATE SET
+            source = 'parser', text = excluded.text, char_count = excluded.char_count,
+            is_empty = excluded.is_empty, updated_at = datetime('now')
+        `);
+        const tx = db.transaction(() => {
+          for (const p of pageAnalysis) {
+            upsertPage.run(contractId, p.page, p.text, p.textLength, p.textLength < 100 ? 1 : 0);
+          }
+        });
+        tx();
+
+        const emptyPages = pageAnalysis.filter((p) => p.textLength < 100);
+        if (emptyPages.length > 0) {
+          console.log(`  [Vision] ${emptyPages.length}/${pageAnalysis.length} pages need OCR. Running parallel Vision...`);
+          const suspectPages = identifySuspectPages(pageAnalysis);
+          const pageImages = convertPagesToImages(filePath, suspectPages);
+          const visionTexts = await extractWithVisionParallel(pageImages, 4);
+
+          if (visionTexts.length > 0) {
+            const tx2 = db.transaction(() => {
+              for (const vt of visionTexts) {
+                upsertPage.run(contractId, vt.page, vt.text, vt.text.length, 0);
+                // Fix: upsert uses parser source, need separate statement for vision
+                db.prepare(`UPDATE contract_pages SET source = 'vision' WHERE contract_id = ? AND page_number = ?`)
+                  .run(contractId, vt.page);
+              }
+            });
+            tx2();
+
+            // Rebuild raw_text
+            const pages = db.prepare(
+              "SELECT page_number, source, text, char_count FROM contract_pages WHERE contract_id = ? ORDER BY page_number"
+            ).all(contractId) as { page_number: number; source: string; text: string; char_count: number }[];
+            let fullText = "";
+            for (const p of pages) {
+              if (p.char_count > 0) {
+                fullText += p.source === "vision"
+                  ? `\n\n[Page ${p.page_number} — Vision OCR]\n${p.text}\n[/Page ${p.page_number}]\n`
+                  : `\n\n[Page ${p.page_number}]\n${p.text}\n[/Page ${p.page_number}]\n`;
+              }
+            }
+            contractText = fullText.trim();
+            db.prepare("UPDATE contracts SET raw_text = ?, updated_at = datetime('now') WHERE id = ?")
+              .run(contractText, contractId);
+            console.log(`  [Vision] Enhanced: ${visionTexts.length} pages. Text: ${row.raw_text.length} → ${contractText.length} chars`);
+          }
+
+          cleanupVisionTemp();
         }
       }
     } catch (err) {
       console.warn(`  [Vision] Pre-analysis check failed: ${err instanceof Error ? err.message.slice(0, 100) : err}`);
+    }
+  }
+
+  // Coverage gate: warn if still insufficient
+  {
+    const emptyCheck = db.prepare(
+      "SELECT COUNT(*) as empty, (SELECT COUNT(*) FROM contract_pages WHERE contract_id = ?) as total FROM contract_pages WHERE contract_id = ? AND is_empty = 1"
+    ).get(contractId, contractId) as { empty: number; total: number } | undefined;
+    if (emptyCheck && emptyCheck.total > 0) {
+      const coverage = Math.round(((emptyCheck.total - emptyCheck.empty) / emptyCheck.total) * 100);
+      if (coverage < 70) {
+        console.warn(`  ⚠️  Coverage ${coverage}% — analysis results may be unreliable`);
+        db.prepare(`
+          INSERT OR IGNORE INTO review_notes (contract_id, type, category, issue, severity, is_reviewed, narrative, created_at, updated_at)
+          VALUES (?, 'low_coverage', 'system', ?, 'high', 0, '', datetime('now'), datetime('now'))
+        `).run(contractId, `Text extraction coverage is only ${coverage}%. Analysis may miss critical contract terms. Manual review of original document recommended.`);
+      }
     }
   }
 
